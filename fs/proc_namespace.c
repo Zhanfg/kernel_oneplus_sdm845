@@ -14,6 +14,8 @@
 #include <linux/sched/task.h>
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 #include <linux/susfs_def.h>
+extern bool susfs_hide_sus_mnts_for_non_su_procs;
+extern bool susfs_is_current_ksu_domain(void);
 #endif
 
 #include "proc/internal.h" /* only for get_proc_task() in ->open() */
