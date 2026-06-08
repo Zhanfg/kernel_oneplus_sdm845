@@ -796,7 +796,7 @@ CONFIG_DEFAULT_TCP_CONG="bbr"
 CONFIG_DEFAULT_BBR=y
 CONFIG_TCP_CONG_CUBIC=y
 CONFIG_NET_SCH_FQ_CODEL=y
-CONFIG_TCP_CONG_BBR2=y
+# CONFIG_TCP_CONG_BBR2 is not set
 # -- Docker + LXC Container Support --
 # Namespaces (additional)
 CONFIG_UTS_NS=y
