@@ -61,10 +61,11 @@ KSU_SRC := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 LOCAL_GIT_EXISTS := $(shell test -e $(KSU_SRC)/../.git && echo 1 || echo 0)
 
 ifeq ($(LOCAL_GIT_EXISTS),0)
+$(warning -- ReSukiSU not found as git submodule, using fallback version info)
 $(info -- Can't find $(REPO_NAME) git submodule!)
 $(info -- If you are using bazel to build this kernel,)
 $(info -- Please go to Kbuild and change KSU_SRC to the absolute path of the KSU kernel folder.)
-$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)
+$(warning -- Using fallback version info for $(REPO_NAME))
 endif
 
 ifdef KBUILD_EXTMOD
@@ -72,6 +73,8 @@ include $(KSU_SRC)/tools/ddk_compatible.mk
 endif
 
 $(shell cd $(KSU_SRC); [ -f ../.git/shallow ] && $(GIT_BIN) fetch --unshallow)
+ifeq ($(LOCAL_GIT_EXISTS),1)
+
 KSU_LOCAL_VERSION := $(shell cd $(KSU_SRC); $(GIT_BIN) rev-list --count HEAD)
 KSU_VERSION := $(shell expr 30000 + $(KSU_LOCAL_VERSION) + 700)
 
@@ -95,6 +98,18 @@ $(info -- $(REPO_NAME) version name: $(KSU_VERSION_FULL))
 
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
+else
+KSU_LOCAL_VERSION := 0
+KSU_VERSION := 30070
+KSU_TAG_NAME := v4.1.0
+KSU_COMMIT_SHA := local
+KSU_BRANCH_NAME := local
+KSU_VERSION_FULL := ReSukiSU local build
+$(info -- $(REPO_NAME) version code: $(KSU_VERSION))
+$(info -- $(REPO_NAME) version name: $(KSU_VERSION_FULL))
+ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+ccflags-y += -DKSU_VERSION_FULL="$(KSU_VERSION_FULL)"
+endif
 
 ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
 $(info -- Supported Unofficial Manager: MKSU, RKSU, KOWSU, SukiSU-Ultra, ReSukiSU )
