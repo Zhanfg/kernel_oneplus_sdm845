@@ -33,6 +33,14 @@
 #include <linux/random.h>
 #include <linux/win_minmax.h>
 
+/* BBR scaling factor and unit — mirrors tcp_bbr.c */
+#ifndef BBR_SCALE
+#define BBR_SCALE 8	/* scaling factor for fractions in BBR (e.g. gains) */
+#endif
+#ifndef BBR_UNIT
+#define BBR_UNIT (1 << BBR_SCALE)
+#endif
+
 /* ── tunables ─────────────────────────────────────────────────────────────── */
 
 static int bbr2_bw_rtts __read_mostly         = 10;  /* BW filter window (RTTs) */
