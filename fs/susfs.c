@@ -1482,8 +1482,79 @@ static void susfs_run_extra_works(struct work_struct *work) {
 	#endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 }
 
+/* sus_path hashtable for fast ino lookups */
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+struct st_susfs_sus_path_hlist {
+	unsigned long target_ino;
+	char target_pathname[SUSFS_MAX_LEN_PATHNAME];
+	struct hlist_node node;
+};
+
+static DEFINE_HASHTABLE(SUS_PATH_HLIST, 10);
+
+int susfs_sus_ino_for_filldir64(unsigned long ino) {
+	struct st_susfs_sus_path_hlist *entry;
+
+	hash_for_each_possible(SUS_PATH_HLIST, entry, node, ino) {
+		if (entry->target_ino == ino)
+			return 1;
+	}
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat) {
+	struct st_susfs_sus_kstat_hlist *entry;
+
+	hash_for_each_possible(SUS_KSTAT_HLIST, entry, node, ino) {
+		if (entry->target_ino == ino) {
+			stat->dev = entry->info.spoofed_dev;
+			stat->ino = entry->info.spoofed_ino;
+			stat->nlink = entry->info.spoofed_nlink;
+			stat->size = entry->info.spoofed_size;
+			stat->atime.tv_sec = entry->info.spoofed_atime_tv_sec;
+			stat->atime.tv_nsec = entry->info.spoofed_atime_tv_nsec;
+			stat->mtime.tv_sec = entry->info.spoofed_mtime_tv_sec;
+			stat->mtime.tv_nsec = entry->info.spoofed_mtime_tv_nsec;
+			stat->ctime.tv_sec = entry->info.spoofed_ctime_tv_sec;
+			stat->ctime.tv_nsec = entry->info.spoofed_ctime_tv_nsec;
+			stat->blocks = entry->info.spoofed_blocks;
+			stat->blksize = entry->info.spoofed_blksize;
+			return;
+		}
+	}
+}
+
+void susfs_sus_ino_for_show_map_vma(unsigned long ino, dev_t *out_dev, unsigned long *out_ino) {
+	struct st_susfs_sus_kstat_hlist *entry;
+
+	hash_for_each_possible(SUS_KSTAT_HLIST, entry, node, ino) {
+		if (entry->target_ino == ino) {
+			*out_dev = entry->info.spoofed_dev;
+			*out_ino = entry->info.spoofed_ino;
+			return;
+		}
+	}
+}
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+struct filename* susfs_get_redirected_path(unsigned long ino) {
+	struct st_susfs_open_redirect_hlist *entry;
+
+	hash_for_each_possible(OPEN_REDIRECT_HLIST, entry, node, ino) {
+		if (entry->target_ino == ino) {
+			SUSFS_LOGI("Redirect for ino: %lu\n", ino);
+			return getname_kernel(entry->redirected_pathname);
+		}
+	}
+	return ERR_PTR(-ENOENT);
+}
+#endif
+
 /* susfs_init */
-void susfs_init(void) {\
+void susfs_init(void) {
 	SUSFS_LOGI("Initializing susfs_extra_works\n");
 	INIT_WORK(&susfs_extra_works, susfs_run_extra_works);
 	SUSFS_LOGI("susfs is initialized! version: " SUSFS_VERSION " \n");
