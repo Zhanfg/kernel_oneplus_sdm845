@@ -1546,7 +1546,7 @@ struct filename* susfs_get_redirected_path(unsigned long ino) {
 	hash_for_each_possible(OPEN_REDIRECT_HLIST, entry, node, ino) {
 		if (entry->target_ino == ino) {
 			SUSFS_LOGI("Redirect for ino: %lu\n", ino);
-			return getname_kernel(entry->redirected_pathname);
+			return getname_kernel(entry->info.redirected_pathname);
 		}
 	}
 	return ERR_PTR(-ENOENT);
