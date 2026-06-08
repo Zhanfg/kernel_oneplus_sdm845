@@ -104,7 +104,7 @@ KSU_VERSION := 30070
 KSU_TAG_NAME := v4.1.0
 KSU_COMMIT_SHA := local
 KSU_BRANCH_NAME := local
-KSU_VERSION_FULL := ReSukiSU local build
+KSU_VERSION_FULL := ReSukiSU-local-build
 $(info -- $(REPO_NAME) version code: $(KSU_VERSION))
 $(info -- $(REPO_NAME) version name: $(KSU_VERSION_FULL))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
