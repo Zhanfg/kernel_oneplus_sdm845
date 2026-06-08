@@ -108,7 +108,7 @@ KSU_VERSION_FULL := ReSukiSU local build
 $(info -- $(REPO_NAME) version code: $(KSU_VERSION))
 $(info -- $(REPO_NAME) version name: $(KSU_VERSION_FULL))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
-ccflags-y += -DKSU_VERSION_FULL="$(KSU_VERSION_FULL)"
+ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
 endif
 
 ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
