@@ -54,14 +54,26 @@
 #define FUSE_SUPER_MAGIC 0x65735546
 #endif
 /*
- * inode->i_state => A 'unsigned long' type storing flag 'AS_FLAGS_', bit 1 to 31 is not usable since 6.12
+ * inode->i_state => storing flag 'INODE_STATE_' (for direct bitmask checks)
+ * inode->i_mapping->flags => storing flag 'AS_FLAGS_' (for test_bit checks)
  * nd->state => storing flag 'ND_STATE_'
  * nd->flags => storing flag 'ND_FLAGS_'
  * task_struct->thread_info.flags => storing flag 'TIF_'
+ * task_struct->susfs_task_state => storing flag 'TASK_STRUCT_'
  */
  // thread_info->flags is unsigned long :D
 #define TIF_PROC_UMOUNTED 33
 
+/* INODE_STATE_* flags for inode->i_state bitmask checks */
+#define INODE_STATE_SUS_PATH BIT(24)
+#define INODE_STATE_SUS_MOUNT BIT(25)
+#define INODE_STATE_SUS_KSTAT BIT(26)
+#define INODE_STATE_OPEN_REDIRECT BIT(27)
+
+/* TASK_STRUCT_* flags for task_struct->susfs_task_state bitmask checks */
+#define TASK_STRUCT_NON_ROOT_USER_APP_PROC BIT(24)
+
+/* AS_FLAGS_* flags for inode->i_mapping->flags (address_space) test_bit checks */
 #define AS_FLAGS_SUS_PATH 33
 #define AS_FLAGS_SUS_MOUNT 34
 #define AS_FLAGS_SUS_KSTAT 35
