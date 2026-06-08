@@ -200,8 +200,13 @@ EXPORT_SYMBOL(vfs_statx_fd);
  */
 #if IS_ENABLED(CONFIG_KSU)
 extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+#ifdef CONFIG_KSU_MANUAL_HOOK
 extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
 extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);
+#else
+static inline void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr) {}
+static inline void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr) {}
+#endif
 #endif
 
 int vfs_statx(int dfd, const char __user *filename, int flags,
