@@ -1,0 +1,38 @@
+config OEM_DEBUG_SUPPORT
+        default n
+        bool
+
+config OEM_SYSRQ_X
+	default n
+	depends on OEM_DEBUG_SUPPORT
+	bool "echo x > /proc/sysrq-trigger to get init process stacktrace"
+
+config OEM_TRACE_SUPPORT
+	default n
+	depends on OEM_DEBUG_SUPPORT
+	bool "OEM debug function, enable it will register the device, which under /dev/otracer."
+
+config OEM_FORCE_DUMP
+	default n
+	bool "OEM force dump function, it will enable goto the force dump"
+
+config PARAM_READ_WRITE
+	bool "Param partition read/write support"
+	default y
+	help
+		if you want to read/write the param partition in kernel,
+		then you must say Y here.
+
+config DEBUG_PARAM_DUMP
+	bool "Param debug support"
+	default n
+	help
+		if you want to dump contents of param partition for debug purpose
+
+config OEM_BOOT_MODE
+	bool "OEM boot mode driver"
+	default n
+	help
+		Say y here to enable the boot mode driver
+
+source "drivers/oneplus/drivers/input/fingerprint/Kconfig"
