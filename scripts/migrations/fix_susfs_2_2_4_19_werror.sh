@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ReSukiSU keeps shared UAPI headers at repository root. The OnePlus 6 tree
+# builds the kernel component from drivers/kernelsu, so make that embedded
+# copy self-contained just like the previous integration.
+test -d /tmp/resukisu/uapi
+rm -rf drivers/kernelsu/uapi
+mkdir -p drivers/kernelsu/uapi
+rsync -a /tmp/resukisu/uapi/ drivers/kernelsu/uapi/
+
 python3 <<'PY'
 from pathlib import Path
 
