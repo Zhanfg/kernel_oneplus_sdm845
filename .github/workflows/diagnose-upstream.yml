@@ -1,0 +1,132 @@
+name: Diagnose 4.19 Upstream
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - ".github/upstream-sync-probe"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout pull request head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Diagnose upstream relationship
+        shell: bash
+        env:
+          UPSTREAM_REPO: https://github.com/EdwinMoq/android_kernel_oneplus_sdm845.git
+          UPSTREAM_BRANCH: lineage-23.2-4.19
+        run: |
+          set -euo pipefail
+
+          git config user.name "upstream-diagnostics"
+          git config user.email "upstream-diagnostics@users.noreply.github.com"
+          git remote add upstream "${UPSTREAM_REPO}"
+          git fetch --no-tags upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+
+          LOCAL_SHA="$(git rev-parse HEAD)"
+          UPSTREAM_REF="refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          UPSTREAM_SHA="$(git rev-parse "${UPSTREAM_REF}")"
+          MERGE_BASE="$(git merge-base HEAD "${UPSTREAM_REF}" 2>/dev/null || true)"
+
+          kernel_version() {
+            git show "$1:Makefile" | awk '
+              /^VERSION =/ {v=$3}
+              /^PATCHLEVEL =/ {p=$3}
+              /^SUBLEVEL =/ {s=$3; print v "." p "." s; exit}
+            '
+          }
+
+          {
+            echo "# OnePlus 6 upstream diagnostics"
+            echo
+            echo "- Local SHA: \`${LOCAL_SHA}\`"
+            echo "- Upstream SHA: \`${UPSTREAM_SHA}\`"
+            echo "- Upstream branch: \`${UPSTREAM_BRANCH}\`"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+          if [ -n "${MERGE_BASE}" ]; then
+            echo "- Common ancestor: \`${MERGE_BASE}\`" | tee -a "${GITHUB_STEP_SUMMARY}"
+            echo "- Strategy tested: normal merge" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+            git switch -c diagnostics/normal-merge
+            set +e
+            git merge --no-commit --no-ff "${UPSTREAM_REF}"
+            STATUS=$?
+            set -e
+
+            if [ "${STATUS}" -ne 0 ]; then
+              echo "" | tee -a "${GITHUB_STEP_SUMMARY}"
+              echo "## Merge conflicts" | tee -a "${GITHUB_STEP_SUMMARY}"
+              git diff --name-only --diff-filter=U | tee /tmp/conflicts.txt
+              sed 's/^/- `/' /tmp/conflicts.txt | sed 's/$/`/' | tee -a "${GITHUB_STEP_SUMMARY}"
+              exit 1
+            fi
+
+            echo "" | tee -a "${GITHUB_STEP_SUMMARY}"
+            echo "Normal merge completed without textual conflicts." | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          mapfile -t ROOTS < <(git rev-list --max-parents=0 HEAD)
+          echo "- Common ancestor: none" | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "- Local root count: ${#ROOTS[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "- Strategy tested: imported-snapshot replay" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${#ROOTS[@]}" -ne 1 ]; then
+            echo "Cannot select a unique imported snapshot baseline." | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          LOCAL_ROOT="${ROOTS[0]}"
+          ROOT_VERSION="$(kernel_version "${LOCAL_ROOT}" || true)"
+          UPSTREAM_VERSION="$(kernel_version "${UPSTREAM_REF}" || true)"
+
+          {
+            echo "- Local root: \`${LOCAL_ROOT}\`"
+            echo "- Local root kernel: \`${ROOT_VERSION:-unknown}\`"
+            echo "- Upstream kernel: \`${UPSTREAM_VERSION:-unknown}\`"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+          if [ -z "${ROOT_VERSION}" ] || [ "${ROOT_VERSION}" != "${UPSTREAM_VERSION}" ]; then
+            echo "Kernel baselines do not match; replay stopped." | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+
+          git diff --binary "${LOCAL_ROOT}" "${LOCAL_SHA}" -- . > /tmp/abk-local-changes.patch
+          echo "- Local patch size: $(du -h /tmp/abk-local-changes.patch | cut -f1)" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+          git switch -c diagnostics/snapshot-replay "${UPSTREAM_REF}"
+          set +e
+          git apply --3way --index --whitespace=nowarn /tmp/abk-local-changes.patch
+          STATUS=$?
+          set -e
+
+          if [ "${STATUS}" -ne 0 ]; then
+            echo "" | tee -a "${GITHUB_STEP_SUMMARY}"
+            echo "## Replay conflicts" | tee -a "${GITHUB_STEP_SUMMARY}"
+            git diff --name-only --diff-filter=U | tee /tmp/conflicts.txt
+            if [ -s /tmp/conflicts.txt ]; then
+              sed 's/^/- `/' /tmp/conflicts.txt | sed 's/$/`/' | tee -a "${GITHUB_STEP_SUMMARY}"
+            else
+              echo "No unmerged index entries; full git status follows." | tee -a "${GITHUB_STEP_SUMMARY}"
+              git status --short | tee -a "${GITHUB_STEP_SUMMARY}"
+            fi
+            exit 1
+          fi
+
+          CHANGED="$(git diff --cached --name-only | awk 'END {print NR + 0}')"
+          echo "" | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "Snapshot replay completed without textual conflicts." | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "- Staged changed files: ${CHANGED}" | tee -a "${GITHUB_STEP_SUMMARY}"
