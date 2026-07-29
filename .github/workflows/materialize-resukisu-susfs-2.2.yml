@@ -1,0 +1,72 @@
+name: Materialize Verified ReSukiSU SuSFS 2.2 Port
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - .github/workflows/materialize-resukisu-susfs-2.2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      TARGET_BRANCH: feature/resukisu-susfs-2.2-20260729
+      RESUKISU_REPOSITORY: ReSukiSU/ReSukiSU
+      RESUKISU_COMMIT: d5ba3d2d51a4c5b41a182112faa13c02b98e31a1
+      SUSFS_PATCH_REPOSITORY: JackA1ltman/NonGKI_Kernel_Build_2nd
+      SUSFS_OLD_COMMIT: 5404a6864ba87efcb15d528c0d68f201d993dac2
+      SUSFS_NEW_COMMIT: 7caf07c44806c1086ba28236c60722fb5699d2b6
+      DEFCONFIG: vendor/enchilada_defconfig
+
+    steps:
+      - name: 检出迁移分支
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: feature/resukisu-susfs-2.2-20260729
+          fetch-depth: 0
+
+      - name: 安装迁移依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git rsync patch patchutils curl python3
+
+      - name: 重放已验证迁移
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/migrations/port_resukisu_susfs_2_2.sh
+          bash scripts/migrations/fix_susfs_2_2_4_19_werror.sh
+
+      - name: 清理上游格式噪音
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/[[:space:]]\+$//' drivers/kernelsu/supercall/dispatch.c
+          sed -i 's/[[:space:]]\+$//' KernelSU/kernel/supercall/dispatch.c
+
+      - name: 校验并提交迁移结果
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '#define SUSFS_VERSION "v2.2.0"' include/linux/susfs.h
+          grep -q '^CONFIG_KSU_SUSFS=y$' arch/arm64/configs/vendor/enchilada_defconfig
+          grep -q '^# CONFIG_KSU_MANUAL_HOOK is not set$' arch/arm64/configs/vendor/enchilada_defconfig
+          test -f drivers/kernelsu/uapi/app_profile.h
+
+          rm -f .github/workflows/port-resukisu-susfs-2.2.yml
+          rm -f .github/workflows/port-resukisu-susfs-2.2-pr.yml
+          rm -f .github/workflows/validate-resukisu-susfs-2.2-v2.yml
+          rm -f .github/workflows/materialize-resukisu-susfs-2.2.yml
+
+          git diff --check
+          git config user.name "abk-migration-bot"
+          git config user.email "abk-migration-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "[migration-result] feat: port ReSukiSU main and SuSFS 2.2.0 to 4.19"
+          git push origin HEAD:${TARGET_BRANCH}
