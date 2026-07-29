@@ -24,10 +24,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.twotone.AccountCircle
+import androidx.compose.material.icons.twotone.Android
+import androidx.compose.material.icons.twotone.Edit
+import androidx.compose.material.icons.twotone.Security
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilterChip
@@ -58,10 +58,12 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.dropUnlessResumed
+import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.resukisu.resukisu.Natives
 import com.resukisu.resukisu.R
+import com.resukisu.resukisu.ksuApp
 import com.resukisu.resukisu.ui.component.SwipeableSnackbarHost
 import com.resukisu.resukisu.ui.component.profile.AppProfileConfig
 import com.resukisu.resukisu.ui.component.profile.RootProfileConfig
@@ -69,7 +71,7 @@ import com.resukisu.resukisu.ui.component.profile.TemplateConfig
 import com.resukisu.resukisu.ui.component.settings.AppBackButton
 import com.resukisu.resukisu.ui.component.settings.SegmentedColumn
 import com.resukisu.resukisu.ui.component.settings.SettingsBaseWidget
-import com.resukisu.resukisu.ui.component.settings.SettingsDropDownPopupMenuWidget
+import com.resukisu.resukisu.ui.component.settings.SettingsDropdownWidget
 import com.resukisu.resukisu.ui.component.settings.SettingsJumpPageWidget
 import com.resukisu.resukisu.ui.component.settings.SettingsSwitchWidget
 import com.resukisu.resukisu.ui.navigation.LocalNavigator
@@ -101,6 +103,9 @@ fun AppProfileScreen(
     val snackBarHost = LocalSnackbarHost.current
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val scope = rememberCoroutineScope()
+    val superUserViewModel = viewModel<SuperUserViewModel>(
+        viewModelStoreOwner = ksuApp
+    )
     val failToUpdateAppProfile = stringResource(R.string.failed_to_update_app_profile).format(
         appGroup.mainApp.label
     )
@@ -190,6 +195,7 @@ fun AppProfileScreen(
                         snackBarHost.showSnackbar(failToUpdateAppProfile.format(appGroup.uid))
                     } else {
                         profile = it
+                        superUserViewModel.notifySuperuserStatusChanged()
                     }
                 }
             },
@@ -217,7 +223,7 @@ private fun AppProfileInner(
         }
 
         item {
-            SettingsDropDownPopupMenuWidget(
+            SettingsDropdownWidget(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 title = appGroup.mainApp.label,
                 description = appGroup.mainApp.packageName,
@@ -247,14 +253,14 @@ private fun AppProfileInner(
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(
+                color = MaterialTheme.colorScheme.surfaceBright.copy(
                     alpha = CardConfig.cardAlpha
                 ),
                 contentColor = MaterialTheme.colorScheme.onSurface,
             )
             {
                 SettingsSwitchWidget(
-                    icon = Icons.Filled.Security,
+                    icon = Icons.TwoTone.Security,
                     title = stringResource(id = R.string.superuser),
                     checked = isRootGranted,
                     onCheckedChange = { onProfileChange(profile.copy(allowSu = it)) },
@@ -287,7 +293,7 @@ private fun AppProfileInner(
                                 .padding(horizontal = 16.dp)
                                 .padding(top = 8.dp),
                             shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(
+                            color = MaterialTheme.colorScheme.surfaceBright.copy(
                                 alpha = CardConfig.cardAlpha
                             ),
                             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -328,7 +334,7 @@ private fun AppProfileInner(
 
                                             item {
                                                 SettingsJumpPageWidget(
-                                                    icon = Icons.Filled.Edit,
+                                                    icon = Icons.TwoTone.Edit,
                                                     title = stringResource(R.string.manage_app_profile),
                                                     description = stringResource(R.string.settings_profile_template_summary),
                                                     onClick = {
@@ -359,7 +365,7 @@ private fun AppProfileInner(
                                 .padding(horizontal = 16.dp)
                                 .padding(top = 8.dp),
                             shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(
+                            color = MaterialTheme.colorScheme.surfaceBright.copy(
                                 alpha = CardConfig.cardAlpha
                             ),
                             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -380,7 +386,7 @@ private fun AppProfileInner(
                                     .padding(horizontal = 16.dp)
                                     .padding(top = 8.dp),
                                 shape = RoundedCornerShape(16.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(
+                                color = MaterialTheme.colorScheme.surfaceBright.copy(
                                     alpha = CardConfig.cardAlpha
                                 ),
                                 contentColor = MaterialTheme.colorScheme.onSurface,
@@ -484,7 +490,7 @@ private fun ProfileBox(
 ) {
     Column {
         SettingsBaseWidget(
-            icon = Icons.Filled.AccountCircle,
+            icon = Icons.TwoTone.AccountCircle,
             title = stringResource(R.string.profile),
             description = mode.text,
         )
@@ -542,13 +548,13 @@ private fun AppProfilePreview() {
     var profile by remember { mutableStateOf(Natives.Profile("")) }
 
     Surface(
-        color = if (CardConfig.isCustomBackgroundEnabled) Color.Transparent else MaterialTheme.colorScheme.surfaceContainerHigh
+        color = if (CardConfig.isCustomBackgroundEnabled) Color.Transparent else MaterialTheme.colorScheme.surfaceBright
     ) {
         AppProfileInner(
             appGroup = SuperUserViewModel.AppGroup(0, emptyList(), null),
             appIcon = {
                 Icon(
-                    imageVector = Icons.Filled.Android,
+                    imageVector = Icons.TwoTone.Android,
                     contentDescription = null,
                 )
             },

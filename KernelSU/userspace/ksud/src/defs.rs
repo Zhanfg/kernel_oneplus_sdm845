@@ -57,6 +57,7 @@ mod android {
     pub const UMOUNT_CONFIG_PATH: &str = concatcp!(WORKING_DIR, ".umount");
 
     pub const DYNAMIC_MANAGER: &str = concatcp!(WORKING_DIR, ".dynamic_manager");
+    pub const SUSFS_CONFIG: &str = concatcp!(WORKING_DIR, ".susfs.json");
 
     #[derive(Serialize)]
     pub struct MountInfo {
@@ -67,6 +68,12 @@ mod android {
 
 pub const VERSION_CODE: &str = include_str!(concat!(env!("OUT_DIR"), "/VERSION_CODE"));
 pub const VERSION_NAME: &str = include_str!(concat!(env!("OUT_DIR"), "/VERSION_NAME"));
+#[cfg(target_os = "android")]
+pub const FULL_VERSION: &str = const_format::formatcp!(
+    "{} (uapi: {})",
+    VERSION_NAME,
+    crate::android::uapi::KERNEL_SU_UAPI_VERSION
+);
 
 #[cfg(target_os = "android")]
 pub use android::*;

@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -33,12 +34,12 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.OpenInBrowser
+import androidx.compose.material.icons.twotone.Code
+import androidx.compose.material.icons.twotone.Download
+import androidx.compose.material.icons.twotone.KeyboardArrowDown
+import androidx.compose.material.icons.twotone.Link
+import androidx.compose.material.icons.twotone.OpenInBrowser
+import androidx.compose.material.icons.twotone.Person
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -76,8 +77,8 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.max
 import com.resukisu.resukisu.R
 import com.resukisu.resukisu.ui.activity.PermissionRequestInterface
 import com.resukisu.resukisu.ui.component.ConfirmResult
@@ -94,6 +95,7 @@ import com.resukisu.resukisu.ui.theme.CardConfig
 import com.resukisu.resukisu.ui.theme.ThemeConfig
 import com.resukisu.resukisu.ui.theme.blurEffect
 import com.resukisu.resukisu.ui.theme.blurSource
+import com.resukisu.resukisu.ui.theme.renderBackgroundBlur
 import com.resukisu.resukisu.ui.util.LocalPermissionRequestInterface
 import com.resukisu.resukisu.ui.util.LocalSnackbarHost
 import com.resukisu.resukisu.ui.util.module.ReleaseAssetInfo
@@ -148,7 +150,7 @@ fun OnlineModuleDetailScreen(module: ModuleRepoViewModel.RepoModule) {
                             }
                         ) {
                             Icon(
-                                imageVector = Icons.Outlined.OpenInBrowser,
+                                imageVector = Icons.TwoTone.OpenInBrowser,
                                 contentDescription = stringResource(R.string.open_module_home_page),
                             )
                         }
@@ -219,14 +221,15 @@ fun OnlineModuleDetailScreen(module: ModuleRepoViewModel.RepoModule) {
                 modifier = Modifier.fillMaxSize()
             ) { page ->
                 when (page) {
-                    0 -> ReadmeTab(module, scrollBehavior.nestedScrollConnection, innerPadding.calculateTopPadding())
+                    0 -> ReadmeTab(module, scrollBehavior.nestedScrollConnection, innerPadding)
                     1 -> ReleasesTab(
                         module,
                         scrollBehavior.nestedScrollConnection,
                         coroutineScope,
-                        innerPadding.calculateTopPadding()
+                        innerPadding
                     )
-                    2 -> InfoTab(module, scrollBehavior.nestedScrollConnection, innerPadding.calculateTopPadding())
+
+                    2 -> InfoTab(module, scrollBehavior.nestedScrollConnection, innerPadding)
                 }
             }
         }
@@ -238,7 +241,7 @@ fun OnlineModuleDetailScreen(module: ModuleRepoViewModel.RepoModule) {
 fun InfoTab(
     module: ModuleRepoViewModel.RepoModule,
     nestedScrollConnection: NestedScrollConnection,
-    topPadding: Dp
+    innerPadding: PaddingValues
 ) {
     val uriHandler = LocalUriHandler.current
 
@@ -248,7 +251,7 @@ fun InfoTab(
         .nestedScroll(nestedScrollConnection)
     ) {
         item {
-            Spacer(Modifier.height(topPadding))
+            Spacer(Modifier.height(innerPadding.calculateTopPadding()))
         }
         item {
             SegmentedColumn(
@@ -257,7 +260,7 @@ fun InfoTab(
                 module.authorList.forEach { author ->
                     item {
                         SettingsBaseWidget(
-                            icon = Icons.Default.Person,
+                            icon = Icons.TwoTone.Person,
                             onClick = {
                                 uriHandler.openUri(author.link)
                             },
@@ -265,7 +268,7 @@ fun InfoTab(
                         ) {
                             Icon(
                                 modifier = Modifier.size(24.dp),
-                                imageVector = Icons.Default.Link,
+                                imageVector = Icons.TwoTone.Link,
                                 contentDescription = stringResource(R.string.author_link)
                             )
                         }
@@ -274,20 +277,26 @@ fun InfoTab(
             }
         }
 
-        item {
-            SegmentedColumn(
-                title = stringResource(R.string.source_code)
-            ) {
-                item {
-                    SettingsBaseWidget(
-                        icon = Icons.Default.Code,
-                        title = module.sourceUrl,
-                        onClick = {
-                            uriHandler.openUri(module.sourceUrl)
-                        }
-                    ) {}
+        if (module.sourceUrl.isNotEmpty() && module.sourceUrl != "null") {
+            item {
+                SegmentedColumn(
+                    title = stringResource(R.string.source_code)
+                ) {
+                    item {
+                        SettingsBaseWidget(
+                            icon = Icons.TwoTone.Code,
+                            title = module.sourceUrl,
+                            onClick = {
+                                uriHandler.openUri(module.sourceUrl)
+                            }
+                        )
+                    }
                 }
             }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(innerPadding.calculateBottomPadding()))
         }
     }
 }
@@ -297,7 +306,7 @@ fun ReleasesTab(
     module: ModuleRepoViewModel.RepoModule,
     nestedScrollConnection: NestedScrollConnection,
     coroutineScope: CoroutineScope,
-    topPadding: Dp
+    innerPadding: PaddingValues,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -306,13 +315,16 @@ fun ReleasesTab(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         item {
-            Spacer(Modifier.height(topPadding))
+            Spacer(Modifier.height(innerPadding.calculateTopPadding()))
         }
         items(
             items = module.releases,
             key = { it.tagName }
         ) {
             ReleaseCard(module, it, coroutineScope)
+        }
+        item {
+            Spacer(Modifier.height(innerPadding.calculateBottomPadding()))
         }
     }
 }
@@ -322,7 +334,7 @@ fun ReleasesTab(
 fun ReadmeTab(
     module: ModuleRepoViewModel.RepoModule,
     nestedScrollConnection: NestedScrollConnection,
-    topPadding: Dp
+    innerPadding: PaddingValues
 ) {
     val loading = remember { mutableStateOf(true) }
 
@@ -334,16 +346,19 @@ fun ReadmeTab(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
-                Spacer(Modifier.height(topPadding))
+                Spacer(Modifier.height(innerPadding.calculateTopPadding()))
             }
             item {
                 Surface(
                     modifier = Modifier
                         .padding(16.dp)
-                        .clip(RoundedCornerShape(12.dp)),
-                    color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(
-                        alpha = CardConfig.cardAlpha
-                    )
+                        .clip(RoundedCornerShape(16.dp))
+                        .renderBackgroundBlur(),
+                    color =
+                        if (ThemeConfig.isEnableBlurExp)
+                            Color.Transparent
+                        else
+                            MaterialTheme.colorScheme.surfaceBright.copy(CardConfig.cardAlpha),
                 ) {
                     GithubMarkdown(
                         content = module.readme,
@@ -371,6 +386,16 @@ fun ReadmeTab(
                     }
                 }
             }
+            item {
+                Spacer(
+                    modifier = Modifier.height(
+                        max(
+                            innerPadding.calculateBottomPadding() - 16.dp,
+                            0.dp
+                        )
+                    )
+                )
+            }
         }
         if (loading.value) {
             LoadingIndicator(
@@ -397,11 +422,15 @@ fun ReleaseCard(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, top = 12.dp),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(
-            alpha = CardConfig.cardAlpha
-        ),
+            .padding(start = 12.dp, end = 12.dp, top = 12.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .renderBackgroundBlur(MaterialTheme.colorScheme.surfaceBright),
+        shape = RoundedCornerShape(16.dp),
+        color =
+            if (ThemeConfig.isEnableBlurExp)
+                Color.Transparent
+            else
+                MaterialTheme.colorScheme.surfaceBright.copy(CardConfig.cardAlpha),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
@@ -469,7 +498,9 @@ fun ReleaseCard(
                         }
                     }
                     SettingsBaseWidget(
-                        modifier = Modifier.clip(RoundedCornerShape(12.dp)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .renderBackgroundBlur(tintColor = MaterialTheme.colorScheme.surfaceBright),
                         title = assetInfo.name,
                         onClick = {
                             onClick()
@@ -486,7 +517,7 @@ fun ReleaseCard(
                         ) {
                             Icon(
                                 modifier = Modifier.size(20.dp),
-                                imageVector = Icons.Outlined.Download,
+                                imageVector = Icons.TwoTone.Download,
                                 contentDescription = null
                             )
                         }
@@ -513,7 +544,7 @@ fun CollapsibleContent(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
+                .clip(RoundedCornerShape(16.dp))
                 .clickable { expanded = !expanded }
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -526,7 +557,7 @@ fun CollapsibleContent(
             )
 
             Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
+                imageVector = Icons.TwoTone.KeyboardArrowDown,
                 contentDescription = null,
                 modifier = Modifier.rotate(rotation),
                 tint = MaterialTheme.colorScheme.onBackground

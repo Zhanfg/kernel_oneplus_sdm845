@@ -14,8 +14,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.twotone.DeleteForever
+import androidx.compose.material.icons.twotone.Save
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -47,6 +47,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.dropUnlessResumed
 import com.resukisu.resukisu.Natives
 import com.resukisu.resukisu.R
+import com.resukisu.resukisu.toOrdinalList
+import com.resukisu.resukisu.toRawFlags
+import com.resukisu.resukisu.toRootProfileFlags
 import com.resukisu.resukisu.ui.component.profile.rootProfileConfig
 import com.resukisu.resukisu.ui.component.settings.AppBackButton
 import com.resukisu.resukisu.ui.component.settings.SegmentedColumn
@@ -211,7 +214,8 @@ fun TemplateEditorScreen(
                         capabilities = it.capabilities,
                         context = it.context,
                         namespace = it.namespace,
-                        rules = it.rules.split("\n")
+                        rules = it.rules.split("\n"),
+                        flags = it.flags.toRootProfileFlags().toOrdinalList(),
                     ).run {
                         if (autoSave) {
                             if (!saveTemplate(this)) {
@@ -228,6 +232,12 @@ fun TemplateEditorScreen(
 }
 
 fun toNativeProfile(templateInfo: TemplateViewModel.TemplateInfo): Natives.Profile {
+    val allFlags = Natives.Profile.RootProfileFlag.entries
+
+    val mappedFlags = templateInfo.flags.mapNotNull { ordinal ->
+        if (ordinal in allFlags.indices) allFlags[ordinal] else null
+    }
+
     return Natives.Profile().copy(rootTemplate = templateInfo.id,
         uid = templateInfo.uid,
         gid = templateInfo.gid,
@@ -235,7 +245,9 @@ fun toNativeProfile(templateInfo: TemplateViewModel.TemplateInfo): Natives.Profi
         capabilities = templateInfo.capabilities,
         context = templateInfo.context,
         namespace = templateInfo.namespace,
-        rules = templateInfo.rules.joinToString("\n").ifBlank { "" })
+        rules = templateInfo.rules.joinToString("\n").ifBlank { "" },
+        flags = mappedFlags.toRawFlags(),
+    )
 }
 
 fun isTemplateValid(template: TemplateViewModel.TemplateInfo): Boolean {
@@ -300,13 +312,13 @@ private fun TopBar(
             }
             IconButton(onClick = onDelete) {
                 Icon(
-                    Icons.Filled.DeleteForever,
+                    Icons.TwoTone.DeleteForever,
                     contentDescription = stringResource(id = R.string.app_profile_template_delete)
                 )
             }
             IconButton(onClick = onSave) {
                 Icon(
-                    imageVector = Icons.Filled.Save,
+                    imageVector = Icons.TwoTone.Save,
                     contentDescription = stringResource(id = R.string.app_profile_template_save)
                 )
             }

@@ -30,7 +30,7 @@
 #include "infra/symbol_resolver.h"
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include "hook/lsm_hook_magic.h"
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS)
 #include <linux/lsm_hooks.h>
 #endif
 
@@ -288,7 +288,8 @@ struct ksu_lsm_hook selinux_setprocattr_hook =
     KSU_LSM_HOOK_INIT(setprocattr, "selinux_setprocattr", ksu_handle_selinux_setprocattr, 0);
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) &&                                                                   \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS))
 static setprocattr_fn ksu_orig_setprocattr;
 uintptr_t selinux_setprocattr_hook_ptr = 0;
 #else
@@ -428,7 +429,7 @@ static void ksu_selinux_hide_unhook()
     }
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
     ksu_lsm_unhook(&selinux_setprocattr_hook);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS)
     if (ksu_orig_setprocattr) {
         ret = ksu_patch_text((void *)selinux_setprocattr_hook_ptr, &ksu_orig_setprocattr, sizeof(ksu_orig_setprocattr),
                              KSU_PATCH_TEXT_FLUSH_DCACHE);
@@ -514,35 +515,26 @@ static int ksu_selinux_hide_enable()
         return -ENOMEM;
     }
 
-    fake_state.ss->sidtab = kzalloc(sizeof(struct sidtab), GFP_KERNEL);
-    if (!fake_state.ss->sidtab) {
-        kfree(fake_state.ss);
-        return -ENOMEM;
-    }
-
     // In normal android
     // Only set selinux policy once
     // So let's just hardcode to 1 to avoid avdSeqNo detect
     //
-    // fake_state.ss->latest_granting = selinux_state.ss->latest_granting;
-    // ^^ Don't do that, it will cause we may put an abnormal latest_granting to avdSeqNo
+    // We manually reset latest_granting to 1, or will cause we may put an abnormal latest_granting to avdSeqNoeqNo
     // Because there will be called in any time, and i am too lazy move it to before apply_kernelsu_rules :)
     fake_state.ss->latest_granting = 1;
 
-    rwlock_init(&(fake_state.ss->policy_rwlock));
+    // Replace policydb/sidtab with ourselves
     memcpy(&fake_state.ss->policydb, backup_policydb, sizeof(struct policydb));
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) || defined(KSU_COMPAT_SIDTAB_AS_REFERENCE)
-    memcpy(fake_state.ss->sidtab, backup_sidtab, sizeof(struct sidtab));
+    fake_state.ss->sidtab = backup_sidtab;
 #else
     memcpy(&fake_state.ss->sidtab, backup_sidtab, sizeof(struct sidtab));
-#endif
-
-    kfree(backup_policydb);
     kfree(backup_sidtab);
+    backup_sidtab = NULL;
+#endif
+    kfree(backup_policydb);
 
     backup_policydb = NULL;
-    backup_sidtab = NULL;
-
 #endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
 
 #endif // #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
@@ -586,7 +578,7 @@ static int ksu_selinux_hide_enable()
         pr_err("selinux_hide: init: selinux_setprocattr_hook err: %d\n", ret);
         goto unhook;
     }
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0) || defined(KSU_COMPAT_HAS_LIST_OF_LSM_HOOKS)
     struct security_hook_list *hp;
 
     // https://github.com/torvalds/linux/commit/df0ce17331e2501dbffc060041dfc6c5f85227b5
@@ -642,11 +634,11 @@ static void ksu_selinux_hide_disable()
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0) && defined(KSU_COMPAT_USE_SELINUX_STATE) &&                          \
     !defined(KSU_COMPAT_HAS_SELINUX_POLICY_STRUCT)
     backup_policydb = kzalloc(sizeof(*backup_policydb), GFP_KERNEL);
-    backup_sidtab = kzalloc(sizeof(*backup_sidtab), GFP_KERNEL);
     memcpy(backup_policydb, &fake_state.ss->policydb, sizeof(struct policydb));
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) || defined(KSU_COMPAT_SIDTAB_AS_REFERENCE)
-    memcpy(backup_sidtab, fake_state.ss->sidtab, sizeof(struct sidtab));
-#else
+
+    // 5.0+ backup_sidtab share memory with fake_state, so we doesn't replace to NULL in lifetime
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0) && !defined(KSU_COMPAT_SIDTAB_AS_REFERENCE)
+    backup_sidtab = kzalloc(sizeof(*backup_sidtab), GFP_KERNEL);
     memcpy(backup_sidtab, &fake_state.ss->sidtab, sizeof(struct sidtab));
 #endif
 
@@ -1725,6 +1717,17 @@ static void type_attribute_bounds_av(struct context *scontext, struct context *t
     struct type_datum *target;
     u32 masked = 0;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || defined(KSU_COMPAT_HAS_MODERN_POLICYDB)
+    // mostly never happen, except Huawei
+    source = backup_policydb->type_val_to_struct[scontext->type - 1];
+    BUG_ON(!source);
+
+    if (!source->bounds)
+        return;
+
+    target = backup_policydb->type_val_to_struct[tcontext->type - 1];
+    BUG_ON(!target);
+#else
     source = flex_array_get_ptr(backup_policydb->type_val_to_struct_array, scontext->type - 1);
     BUG_ON(!source);
 
@@ -1733,6 +1736,8 @@ static void type_attribute_bounds_av(struct context *scontext, struct context *t
 
     target = flex_array_get_ptr(backup_policydb->type_val_to_struct_array, tcontext->type - 1);
     BUG_ON(!target);
+
+#endif
 
     memset(&lo_avd, 0, sizeof(lo_avd));
 
@@ -1823,10 +1828,21 @@ static void context_struct_compute_av(struct context *scontext, struct context *
 	 */
     avkey.target_class = tclass;
     avkey.specified = AVTAB_AV | AVTAB_XPERMS;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) ||                                                                   \
+    (defined(KSU_COMPAT_HAS_MODERN_POLICYDB) && !defined(KSU_COMPAT_TYPE_ATTR_MAP_ARRAY_NOT_FOUND))
+    // mostly never happen
+    sattr = &backup_policydb->type_attr_map_array[scontext->type - 1];
+    tattr = &backup_policydb->type_attr_map_array[tcontext->type - 1];
+#elif defined(KSU_COMPAT_TYPE_ATTR_MAP_ARRAY_NOT_FOUND)
+    // huawei! why rename??!
+    sattr = &backup_policydb->type_attr_map[scontext->type - 1];
+    tattr = &backup_policydb->type_attr_map[tcontext->type - 1];
+#else
     sattr = flex_array_get(backup_policydb->type_attr_map_array, scontext->type - 1);
     BUG_ON(!sattr);
     tattr = flex_array_get(backup_policydb->type_attr_map_array, tcontext->type - 1);
     BUG_ON(!tattr);
+#endif
     ebitmap_for_each_positive_bit(sattr, snode, i)
     {
         ebitmap_for_each_positive_bit(tattr, tnode, j)
