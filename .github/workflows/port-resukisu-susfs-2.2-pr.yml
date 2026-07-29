@@ -88,6 +88,122 @@ jobs:
           Path('KernelSU/kernel/Kbuild').write_text(text)
           PY
 
+      - name: 规范化本仓库的 SuSFS 2.1 定制
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          # fs/open.c: local 2.1 integration added an extra include inside the
+          # function-adjacent block. Normalize it to the reviewed 2.1 patch result
+          # so the 2.1 -> 2.2 interdiff can remove the obsolete do_sys_open hook.
+          path = Path('fs/open.c')
+          text = path.read_text()
+          text = text.replace(
+              '#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n'
+              '#include <linux/susfs_def.h>\n'
+              'extern struct filename *susfs_open_redirect_spoof_do_sys_openat(struct inode *inode);\n'
+              '#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n',
+              '#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n'
+              'extern struct filename *susfs_open_redirect_spoof_do_sys_openat(struct inode *inode);\n'
+              '#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT\n',
+              1,
+          )
+          path.write_text(text)
+
+          # fs/proc_namespace.c: move the extern declarations to the same place
+          # used by the reference 2.1 patch. Local behavior is unchanged.
+          path = Path('fs/proc_namespace.c')
+          text = path.read_text()
+          old = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs_def.h>\nextern bool susfs_hide_sus_mnts_for_non_su_procs;\nextern bool susfs_is_current_ksu_domain(void);\n#endif\n\n#include "proc/internal.h" /* only for get_proc_task() in ->open() */\n\n#include "pnode.h"\n#include "internal.h"\n'''
+          new = '''#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n#include <linux/susfs_def.h>\n#endif\n\n#include "proc/internal.h" /* only for get_proc_task() in ->open() */\n\n#include "pnode.h"\n#include "internal.h"\n\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nextern bool susfs_hide_sus_mnts_for_non_su_procs;\nextern bool susfs_is_current_ksu_domain(void);\n#endif\n'''
+          if old not in text:
+              raise SystemExit('unexpected fs/proc_namespace.c 2.1 layout')
+          path.write_text(text.replace(old, new, 1))
+
+          # fs/proc/task_mmu.c carried an older project-specific kstat helper.
+          # Replace only the SuSFS integration region with the canonical 2.1
+          # result, preserving the surrounding 4.19 vendor code.
+          path = Path('fs/proc/task_mmu.c')
+          text = path.read_text()
+          start = text.index('#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\nextern void susfs_sus_ino_for_show_map_vma')
+          end = text.index('\n\tif (vma->vm_ops && vma->vm_ops->name) {', start)
+          canonical = r'''#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+extern void susfs_sus_kstat_spoof_show_map_vma(struct inode *inode, dev_t *out_dev, unsigned long *out_ino);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+extern int susfs_open_redirect_spoof_show_map_vma(struct inode *inode, unsigned long *out_ino, dev_t *out_dev, char *spoofed_name);
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+
+static void
+show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	struct file *file = vma->vm_file;
+	vm_flags_t flags = vma->vm_flags;
+	unsigned long ino = 0;
+	unsigned long long pgoff = 0;
+	unsigned long start, end;
+	dev_t dev = 0;
+	const char *name = NULL;
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	char *spoofed_redirected_name = NULL;
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+
+	if (file) {
+		struct inode *inode = file_inode(vma->vm_file);
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+		if (SUSFS_IS_INODE_OPEN_REDIRECT(inode)) {
+			if (!susfs_open_redirect_spoof_show_map_vma(inode, &ino, &dev, spoofed_redirected_name)) {
+				pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+				goto orig_flow;
+			}
+		}
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if (SUSFS_IS_INODE_SUS_MAP(inode))
+			return;
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		dev = inode->i_sb->s_dev;
+		ino = inode->i_ino;
+		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
+#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+		susfs_sus_kstat_spoof_show_map_vma(inode, &dev, &ino);
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+	}
+
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+orig_flow:
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	start = vma->vm_start;
+	end = vma->vm_end;
+	show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
+
+	/*
+	 * Print the dentry name for named mappings, and a
+	 * special [heap] marker for the heap:
+	 */
+
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	if (spoofed_redirected_name) {
+		seq_pad(m, ' ');
+		seq_puts(m, spoofed_redirected_name);
+		seq_putc(m, '\n');
+		kfree(spoofed_redirected_name);
+		return;
+	}
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+
+	if (file) {
+		seq_pad(m, ' ');
+		seq_file_path(m, file, "\n");
+		goto done;
+	}
+'''
+          path.write_text(text[:start] + canonical + text[end:])
+          PY
+
       - name: 生成并应用 SuSFS 2.2 的 4.19 差分
         shell: bash
         run: |
@@ -103,8 +219,15 @@ jobs:
 
           mkdir -p patches/susfs
           cp /tmp/susfs-delta.patch patches/susfs/susfs-v2.1.0-to-v2.2.0-4.19.patch
+          set +e
           patch --batch --forward -p1 < /tmp/susfs-delta.patch
-          ! find . -type f -name '*.rej' -print -quit | grep -q .
+          PATCH_STATUS=$?
+          set -e
+          if find . -type f -name '*.rej' -print -quit | grep -q .; then
+            find . -type f -name '*.rej' -print -exec cat {} \;
+            exit 1
+          fi
+          test "${PATCH_STATUS}" -eq 0
           grep -q '#define SUSFS_VERSION "v2.2.0"' include/linux/susfs.h
 
       - name: 切换为 ReSukiSU SuSFS Inline Hook
