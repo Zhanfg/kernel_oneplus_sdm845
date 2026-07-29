@@ -1,0 +1,80 @@
+name: Validate ReSukiSU SuSFS 2.2 v2
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - .github/workflows/validate-resukisu-susfs-2.2-v2.yml
+      - scripts/migrations/port_resukisu_susfs_2_2.sh
+
+permissions:
+  contents: write
+
+jobs:
+  port-and-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      TARGET_BRANCH: feature/resukisu-susfs-2.2-20260729
+      RESUKISU_REPOSITORY: ReSukiSU/ReSukiSU
+      RESUKISU_COMMIT: d5ba3d2d51a4c5b41a182112faa13c02b98e31a1
+      SUSFS_PATCH_REPOSITORY: JackA1ltman/NonGKI_Kernel_Build_2nd
+      SUSFS_OLD_COMMIT: 5404a6864ba87efcb15d528c0d68f201d993dac2
+      SUSFS_NEW_COMMIT: 7caf07c44806c1086ba28236c60722fb5699d2b6
+      DEFCONFIG: vendor/enchilada_defconfig
+
+    steps:
+      - name: 检出迁移分支
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: feature/resukisu-susfs-2.2-20260729
+          fetch-depth: 0
+
+      - name: 安装依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git rsync patch patchutils curl build-essential bc flex bison \
+            libssl-dev libelf-dev gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            clang lld llvm python3 ccache device-tree-compiler libncurses-dev
+
+      - name: 执行固定版本迁移
+        shell: bash
+        run: bash scripts/migrations/port_resukisu_susfs_2_2.sh
+
+      - name: 验证配置并编译 Standard
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/ccache:${PATH}"
+          MAKE_ARGS=(
+            O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+            CLANG_TRIPLE=aarch64-linux-gnu- "CC=ccache clang" LD=ld.lld
+            AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump
+            STRIP=llvm-strip LLVM=1
+          )
+          make "${MAKE_ARGS[@]}" "${DEFCONFIG}"
+          grep -q '^CONFIG_KSU=y$' out/.config
+          grep -q '^CONFIG_KSU_SUSFS=y$' out/.config
+          grep -q '^# CONFIG_KSU_MANUAL_HOOK is not set$' out/.config
+          grep -q '^CONFIG_THREAD_INFO_IN_TASK=y$' out/.config
+          make -j"$(nproc --all)" "${MAKE_ARGS[@]}" Image.gz-dtb dtbs
+          test -s out/arch/arm64/boot/Image.gz-dtb
+          sha256sum out/arch/arm64/boot/Image.gz-dtb
+          rm -rf out
+
+      - name: 提交已验证迁移
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/port-resukisu-susfs-2.2.yml
+          rm -f .github/workflows/port-resukisu-susfs-2.2-pr.yml
+          rm -f .github/workflows/validate-resukisu-susfs-2.2-v2.yml
+          git diff --check
+          git config user.name "abk-migration-bot"
+          git config user.email "abk-migration-bot@users.noreply.github.com"
+          git add -A
+          git commit -m "[migration-result] feat: port ReSukiSU main and SuSFS 2.2.0 to 4.19"
+          git push origin HEAD:${TARGET_BRANCH}
