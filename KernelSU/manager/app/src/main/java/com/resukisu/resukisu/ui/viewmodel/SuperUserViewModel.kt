@@ -7,17 +7,13 @@ import android.content.ServiceConnection
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.IBinder
 import android.os.Parcelable
 import android.util.Log
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.core.content.edit
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.resukisu.resukisu.Natives
 import com.resukisu.resukisu.ksuApp
@@ -25,8 +21,16 @@ import com.resukisu.resukisu.ui.KsuService
 import com.resukisu.resukisu.ui.util.HanziToPinyin
 import com.resukisu.zako.IKsuInterface
 import com.topjohnwu.superuser.Shell
+import com.topjohnwu.superuser.io.SuFile
+import com.topjohnwu.superuser.io.SuFileInputStream
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -68,28 +72,45 @@ enum class SortType(val displayNameRes: Int, val persistKey: String) {
     }
 }
 
+data class SuperUserUiState(
+    val appGroupList: List<SuperUserViewModel.AppGroup> = emptyList(),
+    val search: String = "",
+    val showSystemApps: Boolean = false,
+    val selectedCategory: AppCategory = AppCategory.ALL,
+    val currentSortType: SortType = SortType.NAME_ASC,
+    val isRefreshing: Boolean = false,
+    val loadingProgress: Float = 0f,
+)
+
 class SuperUserViewModel : ViewModel() {
     companion object {
         private const val TAG = "SuperUserViewModel"
+        private const val ALLOWLIST_PATH = "/data/adb/ksu/.allowlist"
+
         private val appsLock = Any()
-        var apps by mutableStateOf<List<AppInfo>>(emptyList())
+        private var allAppsCache: List<AppInfo> = emptyList()
+        private var appsCache: List<AppInfo> = emptyList()
 
         @JvmStatic
         fun getAppIconDrawable(context: Context, packageName: String): Drawable? {
-            val appList = synchronized(appsLock) { apps }
+            val appList = synchronized(appsLock) {
+                allAppsCache.ifEmpty { appsCache }
+            }
             return appList.find { it.packageName == packageName }
                 ?.packageInfo?.applicationInfo?.loadIcon(context.packageManager)
         }
 
-        var appGroups by mutableStateOf<List<AppGroup>>(emptyList())
-
-        private const val PREFS_NAME = "settings"
         private const val KEY_SHOW_SYSTEM_APPS = "show_system_apps"
         private const val KEY_SELECTED_CATEGORY = "selected_category"
         private const val KEY_CURRENT_SORT_TYPE = "current_sort_type"
         private const val CORE_POOL_SIZE = 8
         private const val MAX_POOL_SIZE = 16
         private const val KEEP_ALIVE_TIME = 60L
+
+        @JvmStatic
+        fun getCachedApps(includeManager: Boolean = false): List<AppInfo> = synchronized(appsLock) {
+            if (includeManager) allAppsCache else appsCache
+        }
     }
 
     @Immutable
@@ -111,7 +132,6 @@ class SuperUserViewModel : ViewModel() {
         val uid: Int,
         val apps: List<AppInfo>,
         val profile: Natives.Profile?,
-
     ) : Parcelable {
         @IgnoredOnParcel
         val mainApp: AppInfo = apps.first()
@@ -122,13 +142,23 @@ class SuperUserViewModel : ViewModel() {
         @IgnoredOnParcel
         val userName: String? = Natives.getUserName(uid)
         @IgnoredOnParcel
-        val hasCustomProfile : Boolean = profile?.let { if (it.allowSu) !it.rootUseDefault else !it.nonRootUseDefault } ?: false
+        val hasCustomProfile: Boolean = profile?.let {
+            if (it.allowSu) !it.rootUseDefault else !it.nonRootUseDefault
+        } ?: false
 
         @IgnoredOnParcel
         val isRecentlyInstalled: Boolean = run {
             val cutoffMillis = System.currentTimeMillis() - RECENTLY_INSTALLED_WINDOW_MILLIS
             apps.maxOfOrNull { it.packageInfo.firstInstallTime }?.let { it >= cutoffMillis } == true
         }
+    }
+
+    sealed interface AllowlistOperationResult {
+        data object Success : AllowlistOperationResult
+        data object InvalidFile : AllowlistOperationResult
+        data object UnsupportedVersion : AllowlistOperationResult
+        data class ProfileUpdateFailed(val uid: Int) : AllowlistOperationResult
+        data class Failed(val cause: Throwable? = null) : AllowlistOperationResult
     }
 
     private val appProcessingThreadPool = ThreadPoolExecutor(
@@ -143,19 +173,32 @@ class SuperUserViewModel : ViewModel() {
 
     private val appListMutex = Mutex()
     private val configChangeListeners = mutableSetOf<(String) -> Unit>()
-    private val prefs = ksuApp.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val prefs = ksuApp.ensurePreferencesRepository()
+    private var appGroupsCache: List<AppGroup> = emptyList()
 
-    var search by mutableStateOf("")
-    var showSystemApps by mutableStateOf(prefs.getBoolean(KEY_SHOW_SYSTEM_APPS, false))
-        private set
-    var selectedCategory by mutableStateOf(loadSelectedCategory())
-        private set
-    var currentSortType by mutableStateOf(loadCurrentSortType())
-        private set
-    var isRefreshing by mutableStateOf(false)
-        private set
-    var loadingProgress by mutableFloatStateOf(0f)
-        private set
+    private val _uiState = MutableStateFlow(
+        SuperUserUiState(
+            showSystemApps = prefs.getBoolean(KEY_SHOW_SYSTEM_APPS, false),
+            selectedCategory = loadSelectedCategory(),
+            currentSortType = loadCurrentSortType(),
+        )
+    )
+    val uiState: StateFlow<SuperUserUiState> = _uiState.asStateFlow()
+
+    private fun refreshHomeStatus() {
+        ksuApp.applicationScope.launch {
+            ViewModelProvider(ksuApp)[HomeViewModel::class.java]
+                .refreshSuperuserInfo()
+        }
+    }
+
+    fun notifySuperuserStatusChanged() {
+        refreshHomeStatus()
+        viewModelScope.launch {
+            uiState.first { !it.isRefreshing }
+            fetchAppList()
+        }
+    }
 
     private fun loadSelectedCategory(): AppCategory {
         val categoryKey = prefs.getString(KEY_SELECTED_CATEGORY, AppCategory.ALL.persistKey)
@@ -169,26 +212,112 @@ class SuperUserViewModel : ViewModel() {
         return SortType.fromPersistKey(sortKey)
     }
 
-    fun updateShowSystemApps(newValue: Boolean) {
-        showSystemApps = newValue
-        prefs.edit { putBoolean(KEY_SHOW_SYSTEM_APPS, newValue) }
-        notifyAppListChanged()
+    fun updateSearch(search: String) {
+        _uiState.update { state ->
+            state.copy(
+                search = search,
+                appGroupList = buildAppGroupList(
+                    search = search,
+                    showSystemApps = state.showSystemApps,
+                    selectedCategory = state.selectedCategory,
+                    currentSortType = state.currentSortType,
+                )
+            )
+        }
     }
 
-    private fun notifyAppListChanged() {
-        val currentApps = apps
-        apps = emptyList()
-        apps = currentApps
+    fun updateShowSystemApps(newValue: Boolean) {
+        prefs.putBoolean(KEY_SHOW_SYSTEM_APPS, newValue)
+        _uiState.update { state ->
+            state.copy(
+                showSystemApps = newValue,
+                appGroupList = buildAppGroupList(
+                    search = state.search,
+                    showSystemApps = newValue,
+                    selectedCategory = state.selectedCategory,
+                    currentSortType = state.currentSortType,
+                )
+            )
+        }
     }
 
     fun updateSelectedCategory(newCategory: AppCategory) {
-        selectedCategory = newCategory
-        prefs.edit { putString(KEY_SELECTED_CATEGORY, newCategory.persistKey) }
+        prefs.putString(KEY_SELECTED_CATEGORY, newCategory.persistKey)
+        _uiState.update { state ->
+            state.copy(
+                selectedCategory = newCategory,
+                appGroupList = buildAppGroupList(
+                    search = state.search,
+                    showSystemApps = state.showSystemApps,
+                    selectedCategory = newCategory,
+                    currentSortType = state.currentSortType,
+                )
+            )
+        }
     }
 
     fun updateCurrentSortType(newSortType: SortType) {
-        currentSortType = newSortType
-        prefs.edit { putString(KEY_CURRENT_SORT_TYPE, newSortType.persistKey) }
+        prefs.putString(KEY_CURRENT_SORT_TYPE, newSortType.persistKey)
+        _uiState.update { state ->
+            state.copy(
+                currentSortType = newSortType,
+                appGroupList = buildAppGroupList(
+                    search = state.search,
+                    showSystemApps = state.showSystemApps,
+                    selectedCategory = state.selectedCategory,
+                    currentSortType = newSortType,
+                )
+            )
+        }
+    }
+
+    suspend fun backupAllowlist(uri: Uri): AllowlistOperationResult = withContext(Dispatchers.IO) {
+        try {
+            SuFileInputStream.open(SuFile(ALLOWLIST_PATH)).use { input ->
+                val output = ksuApp.contentResolver.openOutputStream(uri)
+                    ?: return@withContext AllowlistOperationResult.Failed()
+                output.use(input::copyTo)
+            }
+            AllowlistOperationResult.Success
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to back up allowlist", e)
+            AllowlistOperationResult.Failed(e)
+        }
+    }
+
+    suspend fun restoreAllowlist(uri: Uri): AllowlistOperationResult = withContext(Dispatchers.IO) {
+        try {
+            val failedUid = IntArray(1)
+            val status = ksuApp.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                Natives.restoreAllowlistFromFd(descriptor.fd, failedUid)
+            } ?: return@withContext AllowlistOperationResult.InvalidFile
+
+            when (status) {
+                Natives.ALLOWLIST_RESTORE_SUCCESS ->
+                    AllowlistOperationResult.Success
+
+                Natives.ALLOWLIST_RESTORE_INVALID_FILE ->
+                    AllowlistOperationResult.InvalidFile
+
+                Natives.ALLOWLIST_RESTORE_UNSUPPORTED_VERSION ->
+                    AllowlistOperationResult.UnsupportedVersion
+
+                Natives.ALLOWLIST_RESTORE_PROFILE_ERROR ->
+                    AllowlistOperationResult.ProfileUpdateFailed(failedUid[0])
+
+                Natives.ALLOWLIST_RESTORE_IO_ERROR ->
+                    AllowlistOperationResult.Failed()
+
+                else -> AllowlistOperationResult.Failed()
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to restore allowlist", e)
+            AllowlistOperationResult.Failed(e)
+        }
     }
 
     private suspend fun connectKsuService(onDisconnect: () -> Unit = {}): IBinder? =
@@ -226,14 +355,15 @@ class SuperUserViewModel : ViewModel() {
     }
 
     suspend fun fetchAppList() {
-        // prevent multiple concurrent refreshes
-        if (isRefreshing) return
+        if (_uiState.value.isRefreshing) return
 
-        isRefreshing = true
-        loadingProgress = 0f
+        _uiState.update { it.copy(isRefreshing = true, loadingProgress = 0f) }
 
         try {
-            val binder = connectKsuService() ?: run { isRefreshing = false; return }
+            val binder = connectKsuService() ?: run {
+                _uiState.update { it.copy(isRefreshing = false) }
+                return
+            }
 
             withContext(Dispatchers.IO) {
                 val pm = ksuApp.packageManager
@@ -260,26 +390,45 @@ class SuperUserViewModel : ViewModel() {
                         }
                     }
                     start += page.size
-                    loadingProgress = start.toFloat() / total
+                    _uiState.update { it.copy(loadingProgress = start.toFloat() / total) }
                 }
 
                 appListMutex.withLock {
                     val filteredApps = result.filter { it.packageName != ksuApp.packageName }
-                    apps = filteredApps
-                    appGroups = groupAppsByUid(filteredApps)
+                    synchronized(appsLock) {
+                        allAppsCache = result
+                        appsCache = filteredApps
+                    }
+                    appGroupsCache = groupAppsByUid(filteredApps)
                 }
-                loadingProgress = 1f
+                _uiState.update { state ->
+                    state.copy(
+                        appGroupList = buildAppGroupList(
+                            search = state.search,
+                            showSystemApps = state.showSystemApps,
+                            selectedCategory = state.selectedCategory,
+                            currentSortType = state.currentSortType,
+                        ),
+                        loadingProgress = 1f,
+                    )
+                }
+                refreshHomeStatus()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error refresh app list", e)
         } finally {
-            isRefreshing = false
+            _uiState.update { it.copy(isRefreshing = false) }
             stopKsuService()
         }
     }
 
-    val appGroupList by derivedStateOf {
-        appGroups.filter { group ->
+    private fun buildAppGroupList(
+        search: String,
+        showSystemApps: Boolean,
+        selectedCategory: AppCategory,
+        currentSortType: SortType,
+    ): List<AppGroup> {
+        return appGroupsCache.filter { group ->
             group.apps.any { app ->
                 app.label.contains(search, true) ||
                         app.packageName.contains(search, true) ||
@@ -316,16 +465,12 @@ class SuperUserViewModel : ViewModel() {
                 when (currentSortType) {
                     SortType.NAME_ASC -> group1.mainApp.label.lowercase()
                         .compareTo(group2.mainApp.label.lowercase())
-
                     SortType.NAME_DESC -> group2.mainApp.label.lowercase()
                         .compareTo(group1.mainApp.label.lowercase())
-
                     SortType.INSTALL_TIME_NEW -> group2.mainApp.packageInfo.firstInstallTime
                         .compareTo(group1.mainApp.packageInfo.firstInstallTime)
-
                     SortType.INSTALL_TIME_OLD -> group1.mainApp.packageInfo.firstInstallTime
                         .compareTo(group2.mainApp.packageInfo.firstInstallTime)
-
                     else -> group1.mainApp.label.lowercase()
                         .compareTo(group2.mainApp.label.lowercase())
                 }
@@ -334,24 +479,25 @@ class SuperUserViewModel : ViewModel() {
     }
 
     private fun groupAppsByUid(appList: List<AppInfo>): List<AppGroup> {
-    return appList.groupBy { it.uid }
-        .map { (uid, apps) ->
-            val sortedApps = apps.sortedBy { it.label }
-            val profile = apps.firstOrNull()?.let { Natives.getAppProfile(it.packageName, uid) }
-            AppGroup(uid = uid, apps = sortedApps, profile = profile)
-        }
-        .sortedWith(
-            compareBy<AppGroup> {
-                when {
-                    it.allowSu -> 0
-                    it.hasCustomProfile -> 1
-                    else -> 2
-                }
-            }.thenBy(Collator.getInstance(Locale.getDefault())) {
-                it.userName?.takeIf { name -> name.isNotBlank() } ?: it.uid.toString()
-            }.thenBy(Collator.getInstance(Locale.getDefault())) { it.mainApp.label }
-        )
-}
+        return appList.groupBy { it.uid }
+            .map { (uid, apps) ->
+                val sortedApps = apps.sortedBy { it.label }
+                val profile = apps.firstOrNull()?.let { Natives.getAppProfile(it.packageName, uid) }
+                AppGroup(uid = uid, apps = sortedApps, profile = profile)
+            }
+            .sortedWith(
+                compareBy<AppGroup> {
+                    when {
+                        it.allowSu -> 0
+                        it.hasCustomProfile -> 1
+                        else -> 2
+                    }
+                }.thenBy(Collator.getInstance(Locale.getDefault())) {
+                    it.userName?.takeIf { name -> name.isNotBlank() } ?: it.uid.toString()
+                }.thenBy(Collator.getInstance(Locale.getDefault())) { it.mainApp.label }
+            )
+    }
+
     override fun onCleared() {
         super.onCleared()
         try {

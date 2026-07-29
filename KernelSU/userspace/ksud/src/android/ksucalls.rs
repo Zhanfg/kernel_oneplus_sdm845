@@ -1,4 +1,6 @@
 #![allow(clippy::unreadable_literal)]
+use anyhow::bail;
+
 use std::{fs, os::fd::RawFd, sync::OnceLock};
 
 use crate::{android::uapi, defs::MountInfo};
@@ -61,14 +63,18 @@ pub fn ksuctl<T>(request: u32, arg: *mut T) -> std::io::Result<i32> {
 }
 
 // API implementations
-fn get_info() -> uapi::ksu_get_info_cmd {
+pub fn get_info() -> uapi::ksu_get_info_cmd {
     *INFO_CACHE.get_or_init(|| {
         let mut cmd = uapi::ksu_get_info_cmd {
             version: 0,
             flags: 0,
             features: 0,
+            uapi_version: 0,
         };
-        let _ = ksuctl(uapi::KSU_IOCTL_GET_INFO_RUST, &raw mut cmd);
+
+        if ksuctl(uapi::KSU_IOCTL_GET_INFO, &raw mut cmd).is_err() {
+            let _ = ksuctl(uapi::KSU_IOCTL_GET_INFO_LEGACY, &raw mut cmd);
+        }
         cmd
     })
 }
@@ -79,6 +85,59 @@ pub fn get_version() -> i32 {
 
 pub fn is_late_load() -> bool {
     get_info().flags & uapi::KSU_GET_INFO_FLAG_LATE_LOAD_RUST != 0
+}
+
+pub fn is_lkm() -> bool {
+    get_info().flags & uapi::KSU_GET_INFO_FLAG_LKM != 0
+}
+
+pub const fn uapi_version() -> u32 {
+    uapi::KERNEL_SU_UAPI_VERSION
+}
+
+pub fn runtime_mode() -> &'static str {
+    if is_late_load() {
+        "late-load"
+    } else if is_lkm() {
+        "lkm"
+    } else {
+        "built-in"
+    }
+}
+
+pub fn ensure_uapi_version_matched() -> anyhow::Result<()> {
+    let kernel_uapi = get_info().uapi_version;
+    let userspace_uapi = uapi_version();
+    if kernel_uapi != userspace_uapi {
+        bail!(
+            "UAPI version mismatch: kernel={kernel_uapi}, ksud={userspace_uapi}. Please update KernelSU!"
+        );
+    }
+    Ok(())
+}
+
+pub fn get_full_version() -> String {
+    let mut cmd = uapi::ksu_get_full_version_cmd {
+        version_full: [0; 255],
+    };
+
+    let _ = ksuctl(uapi::KSU_IOCTL_GET_FULL_VERSION_RUST, &raw mut cmd);
+
+    let mut buff = [0u8; 256];
+
+    unsafe {
+        let src_ptr = cmd.version_full.as_ptr().cast::<u8>();
+        let dst_ptr = buff.as_mut_ptr();
+        std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 255);
+    }
+
+    buff[255] = 0;
+
+    unsafe {
+        std::ffi::CStr::from_ptr(buff.as_ptr() as *const std::os::raw::c_char)
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 pub fn grant_root() -> std::io::Result<()> {
@@ -249,11 +308,32 @@ pub fn set_init_pgrp() -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn set_ksu_no_new_privs() -> anyhow::Result<()> {
+    let result = ksuctl(
+        uapi::KSU_IOCTL_DISABLE_ESCAPE_TO_ROOT,
+        std::ptr::null_mut::<u8>(),
+    )?;
+    if result != 0 {
+        bail!("unexpected result: {result}");
+    }
+    Ok(())
+}
+
 // downstream begin
 
 pub fn dynamic_manager_set(size: u32, hash: [u8; 64]) -> anyhow::Result<()> {
     let mut cmd = uapi::ksu_dynamic_manager_cmd {
         operation: uapi::DYNAMIC_MANAGER_OP_SET_RUST,
+        size,
+        hash,
+    };
+    ksuctl(uapi::KSU_IOCTL_DYNAMIC_MANAGER_RUST, &raw mut cmd)?;
+    Ok(())
+}
+
+pub fn dynamic_manager_set_synchronous(size: u32, hash: [u8; 64]) -> anyhow::Result<()> {
+    let mut cmd = uapi::ksu_dynamic_manager_cmd {
+        operation: uapi::DYNAMIC_MANAGER_OP_SET_SYNCHRONOUS_RUST,
         size,
         hash,
     };

@@ -9,7 +9,7 @@ use crate::{
     android::{
         debug, dynamic_manager, feature, init_event, ksucalls,
         module::{self, module_config, regenerate_preinit_rc},
-        profile, sepolicy, su, sulog, susfs, umount_config, utils,
+        profile, sepolicy, su, sulog, susfs, uapi, umount_config, utils,
     },
     apk_sign, assets,
     boot_patch::{BootPatchArgs, BootRestoreArgs},
@@ -18,7 +18,7 @@ use crate::{
 
 /// KernelSU userspace cli
 #[derive(Parser, Debug)]
-#[command(author, version = defs::VERSION_NAME, about, long_about = None)]
+#[command(author, version = defs::FULL_VERSION, about, long_about = None)]
 struct Args {
     #[command(subcommand)]
     command: Commands,
@@ -66,12 +66,6 @@ enum Commands {
         /// manager package name
         #[arg(long, default_value_t = String::from("com.resukisu.resukisu"))]
         package_name: String,
-    },
-
-    /// Manage susfs component
-    Susfs {
-        #[command(subcommand)]
-        command: Susfs,
     },
 
     /// Manage auto apply user custom umount configs
@@ -150,6 +144,9 @@ enum Commands {
 
     /// Resetprop - Magisk-compatible system property tool
     Resetprop(crate::android::resetprop::Args),
+
+    /// Manage susfs component
+    Susfs(susfs::cli::SusfsArgs),
 
     /// Manage initrc injection
     Initrc {
@@ -248,6 +245,9 @@ enum Debug {
 
     /// Launch sulogd daemon manually
     Sulogd,
+
+    /// Get kernel info
+    Info,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -490,7 +490,10 @@ enum Kernel {
 #[derive(clap::Subcommand, Debug)]
 enum DynamicManagerOp {
     /// Get the signature of the current dynamic manager (size+hash)
-    Get,
+    Get {
+        #[arg(long)]
+        internal: Option<bool>,
+    },
     /// Set the signature of the dynamic manager
     Set {
         /// the signature size
@@ -530,21 +533,12 @@ enum UmountOp {
 }
 
 #[derive(clap::Subcommand, Debug)]
-enum Susfs {
-    /// Get SUSFS Status
-    Status,
-    /// Get SUSFS Version
-    Version,
-    /// Get SUSFS enable Features
-    Features,
-}
-
-#[derive(clap::Subcommand, Debug)]
 enum Initrc {
     /// Regenerate preinit rc file
     Refresh,
 }
 
+#[allow(clippy::similar_names)]
 pub fn run() -> Result<()> {
     android_logger::init_once(
         Config::default()
@@ -563,24 +557,20 @@ pub fn run() -> Result<()> {
         return crate::android::resetprop::run_from_args(&all_args);
     }
 
+    if arg0.ends_with("ksu_susfs") {
+        let all_args: Vec<String> = std::env::args().collect();
+        return crate::android::susfs::cli::run_from_args(&all_args);
+    }
+
     let cli = Args::parse();
 
     log::info!("command: {:?}", cli.command);
 
     let result = match cli.command {
+        Commands::Susfs(args) => crate::android::susfs::cli::run_main(args),
         Commands::PostFsData => init_event::on_post_data_fs(),
         Commands::BootCompleted => {
             init_event::on_boot_completed();
-            Ok(())
-        }
-        Commands::Susfs { command } => {
-            match command {
-                Susfs::Version => println!("{}", susfs::get_susfs_version()),
-
-                Susfs::Status => println!("{}", susfs::get_susfs_status()),
-
-                Susfs::Features => println!("{}", susfs::get_susfs_features()),
-            }
             Ok(())
         }
         Commands::UmountConfig { command } => match command {
@@ -784,6 +774,22 @@ pub fn run() -> Result<()> {
                 MarkCommand::Refresh => debug::mark_refresh(),
             },
             Debug::Sulogd => sulog::ensure_sulogd_running(),
+            Debug::Info => {
+                let info = ksucalls::get_info();
+                println!("version: {}", info.version);
+                println!("full_version: {}", ksucalls::get_full_version());
+                println!("flags: 0x{:x}", info.flags);
+                println!("uapi_version: {}", info.uapi_version);
+                println!("features: 0x{:x}", info.features);
+                println!("lkm: {}", ksucalls::is_lkm());
+                println!("late_load: {}", ksucalls::is_late_load());
+                println!("runtime_mode: {}", ksucalls::runtime_mode());
+                println!(
+                    "pr_build: {}",
+                    (info.flags & uapi::KSU_GET_INFO_FLAG_PR_BUILD) != 0
+                );
+                Ok(())
+            }
         },
 
         Commands::BootPatch(boot_patch) => crate::boot_patch::patch(boot_patch),
@@ -844,9 +850,18 @@ pub fn run() -> Result<()> {
             },
             Kernel::DynamicManager { command } => match command {
                 DynamicManagerOp::Set { size, hash } => dynamic_manager::set(size, hash),
-                DynamicManagerOp::Get => {
+                DynamicManagerOp::Get { internal } => {
                     let (size, hash) = ksucalls::dynamic_manager_get()?;
-                    println!("size: {}, hash: {}", size, String::from_utf8_lossy(&hash));
+                    if internal.is_some_and(|s| s) {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &serde_json::json!({"size":size,"hash":String::from_utf8_lossy(&hash)})
+                            )?
+                        );
+                    } else {
+                        println!("size: {}, hash: {}", size, String::from_utf8_lossy(&hash));
+                    }
                     Ok(())
                 }
                 DynamicManagerOp::SetApk { apk } => {
