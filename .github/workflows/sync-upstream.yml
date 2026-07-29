@@ -5,8 +5,7 @@ on:
   schedule:
     - cron: "15 3 * * 0"
   push:
-    branches:
-      - master
+    branches: [master]
     paths:
       - ".github/workflows/sync-upstream.yml"
 
@@ -26,7 +25,7 @@ jobs:
   sync:
     if: github.repository == 'Zhanfg/kernel_oneplus_sdm845'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout source repository
@@ -34,28 +33,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Configure Git
+      - name: Configure Git and fetch upstream
+        shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Fetch upstream
-        run: |
           git remote remove upstream 2>/dev/null || true
           git remote add upstream "${UPSTREAM_REPO}"
           git fetch --no-tags --prune upstream \
             "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
 
-      - name: Attempt safe merge
-        id: merge
+      - name: Build safe sync candidate
+        id: sync
         shell: bash
         run: |
           set -euo pipefail
 
           LOCAL_SHA="$(git rev-parse HEAD)"
-          LOCAL_SHORT="${LOCAL_SHA:0:12}"
           UPSTREAM_REF="refs/remotes/upstream/${UPSTREAM_BRANCH}"
           UPSTREAM_SHA="$(git rev-parse "${UPSTREAM_REF}")"
+          LOCAL_SHORT="${LOCAL_SHA:0:12}"
           UPSTREAM_SHORT="${UPSTREAM_SHA:0:12}"
           SYNC_DATE="$(date -u +%Y%m%d)"
           SYNC_BRANCH="sync/upstream-${SYNC_DATE}-${UPSTREAM_SHORT}-${LOCAL_SHORT}"
@@ -64,6 +62,34 @@ jobs:
           echo "local_sha=${LOCAL_SHA}" >> "${GITHUB_OUTPUT}"
           echo "upstream_sha=${UPSTREAM_SHA}" >> "${GITHUB_OUTPUT}"
           echo "sync_branch=${SYNC_BRANCH}" >> "${GITHUB_OUTPUT}"
+
+          set_outputs() {
+            echo "result=$1" >> "${GITHUB_OUTPUT}"
+            echo "strategy=$2" >> "${GITHUB_OUTPUT}"
+            echo "conflict=$3" >> "${GITHUB_OUTPUT}"
+          }
+
+          finish_problem() {
+            local result="$1"
+            local strategy="$2"
+            shift 2
+            {
+              echo "## Result"
+              echo
+              printf '%s\n' "$@"
+            } >> "${REPORT}"
+            cat "${REPORT}" >> "${GITHUB_STEP_SUMMARY}"
+            set_outputs "${result}" "${strategy}" "true"
+            exit 0
+          }
+
+          kernel_version() {
+            git show "$1:Makefile" | awk '
+              /^VERSION =/ {v=$3}
+              /^PATCHLEVEL =/ {p=$3}
+              /^SUBLEVEL =/ {s=$3; print v "." p "." s; exit}
+            '
+          }
 
           {
             echo "# OnePlus 6 upstream sync report"
@@ -75,88 +101,150 @@ jobs:
             echo
           } > "${REPORT}"
 
-          if ! MERGE_BASE="$(git merge-base HEAD "${UPSTREAM_REF}")"; then
+          MERGE_BASE="$(git merge-base HEAD "${UPSTREAM_REF}" 2>/dev/null || true)"
+
+          if [ -n "${MERGE_BASE}" ]; then
+            STRATEGY="merge"
+            echo "- Common ancestor: \`${MERGE_BASE}\`" >> "${REPORT}"
+            echo "- Strategy: normal Git merge" >> "${REPORT}"
+            echo >> "${REPORT}"
+
+            if git merge-base --is-ancestor "${UPSTREAM_REF}" HEAD; then
+              {
+                echo "## Result"
+                echo
+                echo "The local branch already contains the selected upstream commit."
+              } >> "${REPORT}"
+              cat "${REPORT}" >> "${GITHUB_STEP_SUMMARY}"
+              set_outputs "up-to-date" "merge" "false"
+              exit 0
+            fi
+
+            git switch -c "${SYNC_BRANCH}"
+            set +e
+            git merge --no-ff --no-edit "${UPSTREAM_REF}"
+            STATUS=$?
+            set -e
+
+            if [ "${STATUS}" -ne 0 ]; then
+              CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
+              {
+                echo "## Conflicting files"
+                echo
+                if [ -n "${CONFLICTS}" ]; then
+                  while IFS= read -r file; do echo "- \`${file}\`"; done <<< "${CONFLICTS}"
+                else
+                  echo "- Git stopped before producing a conflict list."
+                fi
+              } >> "${REPORT}"
+              git merge --abort 2>/dev/null || true
+              finish_problem "merge-conflict" "merge" \
+                "The normal upstream merge has conflicts. Nothing was pushed."
+            fi
+          else
+            STRATEGY="snapshot-replay"
+            echo "- Common ancestor: none" >> "${REPORT}"
+            echo "- Strategy: replay local net changes from the imported snapshot" >> "${REPORT}"
+            echo >> "${REPORT}"
+
+            mapfile -t ROOTS < <(git rev-list --max-parents=0 HEAD)
+            if [ "${#ROOTS[@]}" -ne 1 ]; then
+              finish_problem "ambiguous-root" "${STRATEGY}" \
+                "The local repository has ${#ROOTS[@]} root commits, so an imported snapshot baseline cannot be selected automatically."
+            fi
+
+            LOCAL_ROOT="${ROOTS[0]}"
+            ROOT_VERSION="$(kernel_version "${LOCAL_ROOT}" || true)"
+            UPSTREAM_VERSION="$(kernel_version "${UPSTREAM_REF}" || true)"
+
             {
-              echo "## Result"
+              echo "- Local root snapshot: \`${LOCAL_ROOT}\`"
+              echo "- Local root kernel version: \`${ROOT_VERSION:-unknown}\`"
+              echo "- Upstream kernel version: \`${UPSTREAM_VERSION:-unknown}\`"
               echo
-              echo "No common ancestor was found. The repositories cannot be merged safely without a manual import strategy."
             } >> "${REPORT}"
-            cat "${REPORT}" >> "${GITHUB_STEP_SUMMARY}"
-            echo "result=no-common-ancestor" >> "${GITHUB_OUTPUT}"
-            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
-            echo "conflict=true" >> "${GITHUB_OUTPUT}"
-            exit 0
+
+            if [ -z "${ROOT_VERSION}" ] || [ "${ROOT_VERSION}" != "${UPSTREAM_VERSION}" ]; then
+              finish_problem "baseline-mismatch" "${STRATEGY}" \
+                "The local root snapshot and selected upstream do not use the same kernel version. Automatic replay was stopped."
+            fi
+
+            PATCH_FILE="/tmp/abk-local-changes.patch"
+            git diff --binary "${LOCAL_ROOT}" "${LOCAL_SHA}" -- . > "${PATCH_FILE}"
+            if [ ! -s "${PATCH_FILE}" ]; then
+              finish_problem "no-local-delta" "${STRATEGY}" \
+                "No local changes were found after the imported root snapshot."
+            fi
+
+            git switch -c "${SYNC_BRANCH}" "${UPSTREAM_REF}"
+            set +e
+            git apply --3way --index --whitespace=nowarn "${PATCH_FILE}"
+            STATUS=$?
+            set -e
+
+            if [ "${STATUS}" -ne 0 ]; then
+              CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
+              GIT_STATUS="$(git status --short || true)"
+              {
+                echo "## Conflicting files"
+                echo
+                if [ -n "${CONFLICTS}" ]; then
+                  while IFS= read -r file; do echo "- \`${file}\`"; done <<< "${CONFLICTS}"
+                else
+                  echo "- No unmerged index entries were reported."
+                fi
+                echo
+                echo "## Git status"
+                echo
+                echo '```text'
+                printf '%s\n' "${GIT_STATUS}"
+                echo '```'
+              } >> "${REPORT}"
+              git reset --hard "${UPSTREAM_SHA}"
+              git clean -fd
+              finish_problem "replay-conflict" "${STRATEGY}" \
+                "Replaying the local ABK delta onto upstream produced conflicts. Nothing was pushed."
+            fi
+
+            if git diff --cached --quiet; then
+              finish_problem "empty-replay" "${STRATEGY}" \
+                "The local delta produced no candidate changes after applying to upstream."
+            fi
+
+            git commit -m "chore: replay ABK local changes onto upstream ${UPSTREAM_SHORT}"
+            REPLAY_SHA="$(git rev-parse HEAD)"
+            CANDIDATE_TREE="$(git rev-parse "${REPLAY_SHA}^{tree}")"
+            BRIDGE_SHA="$(printf '%s\n' \
+              "chore: connect ABK history to upstream ${UPSTREAM_SHORT}" \
+              "" \
+              "Replayed ${LOCAL_ROOT}..${LOCAL_SHA} onto ${UPSTREAM_SHA}." | \
+              git commit-tree "${CANDIDATE_TREE}" -p "${LOCAL_SHA}" -p "${REPLAY_SHA}")"
+            git reset --hard "${BRIDGE_SHA}"
           fi
 
-          echo "- Merge base: \`${MERGE_BASE}\`" >> "${REPORT}"
-          echo >> "${REPORT}"
-
-          if git merge-base --is-ancestor "${UPSTREAM_REF}" HEAD; then
-            {
-              echo "## Result"
-              echo
-              echo "The local branch already contains the selected upstream commit."
-            } >> "${REPORT}"
-            cat "${REPORT}" >> "${GITHUB_STEP_SUMMARY}"
-            echo "result=up-to-date" >> "${GITHUB_OUTPUT}"
-            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
-            echo "conflict=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          git switch -c "${SYNC_BRANCH}"
-
-          set +e
-          git merge --no-ff --no-edit "${UPSTREAM_REF}"
-          MERGE_STATUS=$?
-          set -e
-
-          if [ "${MERGE_STATUS}" -ne 0 ]; then
-            CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
-            {
-              echo "## Result"
-              echo
-              echo "The upstream merge has conflicts. Nothing was pushed and master was not modified."
-              echo
-              echo "## Conflicting files"
-              echo
-              if [ -n "${CONFLICTS}" ]; then
-                while IFS= read -r file; do
-                  echo "- \`${file}\`"
-                done <<< "${CONFLICTS}"
-              else
-                echo "- Git stopped before producing a normal conflict list. Check the merge output in this run."
-              fi
-            } >> "${REPORT}"
-            cat "${REPORT}" >> "${GITHUB_STEP_SUMMARY}"
-            git merge --abort 2>/dev/null || true
-            echo "result=conflict" >> "${GITHUB_OUTPUT}"
-            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
-            echo "conflict=true" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          COMMIT_COUNT="$(git rev-list --count --no-merges "${LOCAL_SHA}..HEAD")"
+          CHANGE_COUNT="$(git diff --name-only "${LOCAL_SHA}" HEAD | awk 'END {print NR + 0}')"
           {
             echo "## Result"
             echo
-            echo "The upstream branch merged without textual conflicts. A Draft PR will be created for review and build verification."
+            echo "A sync candidate was created without unresolved textual conflicts."
             echo
-            echo "- Non-merge commits introduced: ${COMMIT_COUNT}"
+            echo "- Strategy: \`${STRATEGY}\`"
+            echo "- Candidate branch: \`${SYNC_BRANCH}\`"
+            echo "- Files changed relative to local master: ${CHANGE_COUNT}"
             echo
-            echo "## First 200 introduced commits"
+            echo "## First 200 changed paths"
             echo
-            git log --oneline --no-merges -n 200 "${LOCAL_SHA}..HEAD" | sed 's/^/- `/' | sed 's/$/`/'
-            if [ "${COMMIT_COUNT}" -gt 200 ]; then
+            git diff --name-only "${LOCAL_SHA}" HEAD | sed -n '1,200p' | while IFS= read -r file; do
+              echo "- \`${file}\`"
+            done
+            if [ "${CHANGE_COUNT}" -gt 200 ]; then
               echo
-              echo "The report is truncated. Review the full commit range in the Draft PR."
+              echo "The list is truncated. Review the complete Draft PR diff."
             fi
           } >> "${REPORT}"
 
           cat "${REPORT}" >> "${GITHUB_STEP_SUMMARY}"
-          echo "result=clean-merge" >> "${GITHUB_OUTPUT}"
-          echo "has_changes=true" >> "${GITHUB_OUTPUT}"
-          echo "conflict=false" >> "${GITHUB_OUTPUT}"
+          set_outputs "clean-candidate" "${STRATEGY}" "false"
 
       - name: Upload sync report
         if: always()
@@ -166,37 +254,40 @@ jobs:
           path: upstream-sync-report.md
           if-no-files-found: warn
 
-      - name: Push sync branch
-        if: steps.merge.outputs.result == 'clean-merge'
-        run: |
-          git push origin "HEAD:refs/heads/${{ steps.merge.outputs.sync_branch }}"
+      - name: Push candidate branch
+        if: steps.sync.outputs.result == 'clean-candidate'
+        run: git push origin "HEAD:refs/heads/${{ steps.sync.outputs.sync_branch }}"
 
       - name: Create Draft pull request
-        if: steps.merge.outputs.result == 'clean-merge'
+        if: steps.sync.outputs.result == 'clean-candidate'
         env:
           GH_TOKEN: ${{ github.token }}
-          SYNC_BRANCH: ${{ steps.merge.outputs.sync_branch }}
-          LOCAL_SHA: ${{ steps.merge.outputs.local_sha }}
-          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+          SYNC_BRANCH: ${{ steps.sync.outputs.sync_branch }}
+          LOCAL_SHA: ${{ steps.sync.outputs.local_sha }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+          STRATEGY: ${{ steps.sync.outputs.strategy }}
+        shell: bash
         run: |
+          set -euo pipefail
           EXISTING="$(gh pr list --base master --head "${SYNC_BRANCH}" --state open --json url --jq '.[0].url // empty')"
           if [ -n "${EXISTING}" ]; then
             echo "Existing PR: ${EXISTING}" >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
-          cat > /tmp/upstream-pr-body.md <<EOF
-          ## Upstream
-
-          - Repository: \`EdwinMoq/android_kernel_oneplus_sdm845\`
-          - Branch: \`${UPSTREAM_BRANCH}\`
-          - Upstream SHA: \`${UPSTREAM_SHA}\`
-          - Local base: \`${LOCAL_SHA}\`
-
-          ## Policy
-
-          This PR was created only because the normal Git merge completed without textual conflicts. It remains Draft and must not be merged until Standard and PowerSave builds pass and the local ReSukiSU, SuSFS, BBG, network, defconfig and device changes are reviewed.
-          EOF
+          {
+            echo "## Upstream"
+            echo
+            echo "- Repository: \`EdwinMoq/android_kernel_oneplus_sdm845\`"
+            echo "- Branch: \`${UPSTREAM_BRANCH}\`"
+            echo "- Upstream SHA: \`${UPSTREAM_SHA}\`"
+            echo "- Local base: \`${LOCAL_SHA}\`"
+            echo "- Strategy: \`${STRATEGY}\`"
+            echo
+            echo "## Required validation"
+            echo
+            echo "This PR is only a candidate. Keep it Draft until Standard and PowerSave builds pass and ReSukiSU, SuSFS, BBG, networking, defconfig, DTS/DTBO and device functions are reviewed and tested."
+          } > /tmp/upstream-pr-body.md
 
           gh pr create \
             --draft \
@@ -205,8 +296,8 @@ jobs:
             --title "chore: sync OnePlus 6 Linux 4.19 upstream" \
             --body-file /tmp/upstream-pr-body.md
 
-      - name: Fail when manual conflict resolution is required
-        if: steps.merge.outputs.conflict == 'true'
+      - name: Fail when manual work is required
+        if: steps.sync.outputs.conflict == 'true'
         run: |
-          echo "Upstream synchronization requires manual conflict resolution. See the uploaded report."
+          echo "Upstream synchronization requires manual review. See the uploaded report."
           exit 1
