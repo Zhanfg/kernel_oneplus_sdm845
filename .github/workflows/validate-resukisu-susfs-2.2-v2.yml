@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/validate-resukisu-susfs-2.2-v2.yml
       - scripts/migrations/port_resukisu_susfs_2_2.sh
+      - scripts/migrations/fix_susfs_2_2_4_19_werror.sh
 
 permissions:
   contents: write
@@ -43,6 +44,10 @@ jobs:
       - name: 执行固定版本迁移
         shell: bash
         run: bash scripts/migrations/port_resukisu_susfs_2_2.sh
+
+      - name: 应用 4.19 Werror 兼容修复
+        shell: bash
+        run: bash scripts/migrations/fix_susfs_2_2_4_19_werror.sh
 
       - name: 验证配置并编译 Standard
         shell: bash
