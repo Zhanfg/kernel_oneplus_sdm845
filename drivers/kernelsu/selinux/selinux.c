@@ -24,6 +24,10 @@ static u32 cached_zygote_sid __read_mostly = 0;
 static u32 cached_init_sid __read_mostly = 0;
 u32 ksu_file_sid __read_mostly = 0;
 
+#ifdef CONFIG_KSU_SUSFS
+static u32 cached_zygote_next_sid __read_mostly = 0;
+#endif
+
 static int transive_to_domain(const char *domain, struct cred *cred, bool clear_exec_sid)
 {
     u32 sid;
@@ -145,6 +149,16 @@ void cache_sid(void)
         pr_info("Cached zygote SID: %u\n", cached_zygote_sid);
     }
 
+#ifdef CONFIG_KSU_SUSFS
+    err = security_secctx_to_secid(ZYGOTE_NEXT_DOMAIN, strlen(ZYGOTE_NEXT_DOMAIN), &cached_zygote_next_sid);
+    if (err) {
+        pr_warn("Failed to cache zygote next SID: %d, safe to ignore on Android versions without zygote_next\n", err);
+        cached_zygote_next_sid = 0;
+    } else {
+        pr_info("Cached zygote next SID: %u\n", cached_zygote_next_sid);
+    }
+#endif
+
     err = security_secctx_to_secid(INIT_CONTEXT, strlen(INIT_CONTEXT), &cached_init_sid);
     if (err) {
         pr_warn("Failed to cache init SID: %d\n", err);
@@ -236,6 +250,13 @@ bool is_zygote(const struct cred *cred)
 {
     return is_sid_match(cred, cached_zygote_sid, ZYGOTE_CONTEXT);
 }
+
+#ifdef CONFIG_KSU_SUSFS
+bool is_zygote_next(const struct cred *cred)
+{
+    return is_sid_match(cred, cached_zygote_next_sid, ZYGOTE_NEXT_DOMAIN);
+}
+#endif
 
 bool is_init(const struct cred *cred)
 {
