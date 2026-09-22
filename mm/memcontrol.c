@@ -2167,7 +2167,7 @@ static void reclaim_high(struct mem_cgroup *memcg,
 		if (page_counter_read(&memcg->memory) <= memcg->high)
 			continue;
 		memcg_memory_event(memcg, MEMCG_HIGH);
-		try_to_free_mem_cgroup_pages(memcg, nr_pages, gfp_mask, true);
+		try_to_free_mem_cgroup_pages(memcg, nr_pages, gfp_mask, true, NULL);
 	} while ((memcg = parent_mem_cgroup(memcg)));
 }
 
@@ -2269,7 +2269,7 @@ retry:
 	memcg_memory_event(mem_over_limit, MEMCG_MAX);
 
 	nr_reclaimed = try_to_free_mem_cgroup_pages(mem_over_limit, nr_pages,
-						    gfp_mask, may_swap);
+						    gfp_mask, may_swap, NULL);
 
 	if (mem_cgroup_margin(mem_over_limit) >= nr_pages)
 		goto retry;
@@ -2833,7 +2833,7 @@ static int mem_cgroup_resize_max(struct mem_cgroup *memcg,
 		}
 
 		if (!try_to_free_mem_cgroup_pages(memcg, 1,
-					GFP_KERNEL, !memsw)) {
+					GFP_KERNEL, !memsw, NULL)) {
 			ret = -EBUSY;
 			break;
 		}
@@ -2966,7 +2966,7 @@ static int mem_cgroup_force_empty(struct mem_cgroup *memcg)
 			return -EINTR;
 
 		progress = try_to_free_mem_cgroup_pages(memcg, 1,
-							GFP_KERNEL, true);
+							GFP_KERNEL, true, NULL);
 		if (!progress) {
 			nr_retries--;
 			/* maybe some writeback is necessary */
@@ -5563,7 +5563,7 @@ static ssize_t memory_high_write(struct kernfs_open_file *of,
 	nr_pages = page_counter_read(&memcg->memory);
 	if (nr_pages > high)
 		try_to_free_mem_cgroup_pages(memcg, nr_pages - high,
-					     GFP_KERNEL, true);
+					     GFP_KERNEL, true, NULL);
 
 	memcg_wb_domain_size_changed(memcg);
 	return nbytes;
@@ -5617,7 +5617,7 @@ static ssize_t memory_max_write(struct kernfs_open_file *of,
 
 		if (nr_reclaims) {
 			if (!try_to_free_mem_cgroup_pages(memcg, nr_pages - max,
-							  GFP_KERNEL, true))
+							  GFP_KERNEL, true, NULL))
 				nr_reclaims--;
 			continue;
 		}
@@ -5757,33 +5757,55 @@ static ssize_t memory_oom_group_write(struct kernfs_open_file *of,
 	return nbytes;
 }
 
-static ssize_t memory_reclaim(struct kernfs_open_file *of,
-			      char *buf, size_t nbytes, loff_t off)
+static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
+			      size_t nbytes, loff_t off)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
 	unsigned int nr_retries = MEM_CGROUP_RECLAIM_RETRIES;
 	unsigned long nr_to_reclaim, nr_reclaimed = 0;
+	int swappiness = -1;
+	char *amount, *opt;
 	int err;
 
 	buf = strstrip(buf);
 	if (!buf || !*buf)
 		return -EINVAL;
 
-	if (!strcmp(buf, "max")) {
+	amount = strsep(&buf, " ");
+	if (!amount || !*amount)
+		return -EINVAL;
+
+	if (!strcmp(amount, "max")) {
 		nr_to_reclaim = page_counter_read(&memcg->memory);
 	} else {
-		err = page_counter_memparse(buf, "", &nr_to_reclaim);
+		err = page_counter_memparse(amount, "", &nr_to_reclaim);
 		if (err)
 			return err;
+	}
+
+	while (buf && (opt = strsep(&buf, " ")) != NULL) {
+		if (!*opt)
+			continue;
+		if (!strncmp(opt, "swappiness=", 11)) {
+			err = kstrtoint(opt + 11, 10, &swappiness);
+			if (err || swappiness < 0 || swappiness > 200)
+				return -EINVAL;
+			continue;
+		}
+		return -EINVAL;
 	}
 
 	if (!nr_to_reclaim)
 		return nbytes;
 
 	/*
-	 * Android's cached-app freezer can write the frozen memcg's current
-	 * usage here to proactively evict file pages and swap anonymous pages
-	 * into zram. Drain stock first so reclaim sees recent charges.
+	 * Android 17 libprocessgroup writes:
+	 *   <bytes>                 for full reclaim
+	 *   <bytes> swappiness=0    for file-only reclaim
+	 *   <bytes> swappiness=200  for anon-oriented reclaim
+	 *
+	 * Keep the override local to this scan_control so proactive compaction
+	 * never races with the global vm.swappiness or memcg configuration.
 	 */
 	drain_all_stock(memcg);
 
@@ -5794,7 +5816,8 @@ static ssize_t memory_reclaim(struct kernfs_open_file *of,
 			return -EINTR;
 
 		reclaimed = try_to_free_mem_cgroup_pages(
-			memcg, nr_to_reclaim - nr_reclaimed, GFP_KERNEL, true);
+			memcg, nr_to_reclaim - nr_reclaimed, GFP_KERNEL, true,
+			swappiness >= 0 ? &swappiness : NULL);
 
 		if (!reclaimed) {
 			if (!nr_retries--)
