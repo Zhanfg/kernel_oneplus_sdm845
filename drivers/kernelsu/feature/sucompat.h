@@ -13,6 +13,13 @@ extern bool ksu_su_compat_enabled;
 void ksu_sucompat_init(void);
 void ksu_sucompat_exit(void);
 
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#define ksu_is_current_proc_unprivillege susfs_is_current_proc_no_su
+#define ksu_set_current_proc_unprivillege susfs_set_current_proc_no_su
+#define ksu_clear_current_proc_unprivillege susfs_clear_current_proc_no_su
+#endif
+
 // Handler functions exported for hook_manager
 int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *__unused_flags);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0) && defined(CONFIG_KSU_SUSFS)
