@@ -75,6 +75,10 @@
 
 #include <uapi/linux/android/binder.h>
 #include <uapi/linux/android/binderfs.h>
+
+#ifdef CONFIG_REKERNEL
+#include <../rekernel/rekernel.h>
+#endif
 #include <uapi/linux/sched/types.h>
 
 #include <asm/cacheflush.h>
@@ -3250,6 +3254,32 @@ static void binder_transaction(struct binder_proc *proc,
 			goto err_bad_extra_size;
 		}
 	}
+
+#ifdef CONFIG_REKERNEL
+	/*
+	 * OP6 Re:Kernel frozen-app notification path.
+	 * Keep the Binder ABI untouched: report only when the Re:Kernel
+	 * userspace listener is present and the target task is frozen.
+	 */
+	if (reply) {
+		binder_reply_handler(proc->pid, proc->tsk,
+				     target_proc->pid, target_proc->tsk,
+				     false, tr);
+	} else {
+		bool rk_oneway = !!(tr->flags & TF_ONE_WAY);
+
+		binder_trans_handler(proc->pid, proc->tsk,
+				     target_proc->pid, target_proc->tsk,
+				     rk_oneway, tr);
+
+		if (rk_oneway &&
+		    binder_alloc_get_free_async_space(&target_proc->alloc) <
+			    (target_proc->alloc.buffer_size / 10 + 0x300))
+			binder_overflow_handler(proc->pid, proc->tsk,
+						target_proc->pid, target_proc->tsk,
+						true, tr);
+	}
+#endif
 
 	trace_binder_transaction(reply, t, target_node);
 
