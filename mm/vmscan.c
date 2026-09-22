@@ -87,6 +87,12 @@ struct scan_control {
 	/* Can pages be swapped as part of reclaim? */
 	unsigned int may_swap:1;
 
+	/*
+	 * Optional per-invocation swappiness for proactive memcg reclaim.
+	 * NULL preserves the memcg/global setting.
+	 */
+	int *proactive_swappiness;
+
 	/* e.g. boosted watermark reclaim leaves slabs alone */
 	unsigned int may_shrinkslab:1;
 
@@ -2347,7 +2353,8 @@ static void get_scan_count(struct lruvec *lruvec, struct mem_cgroup *memcg,
 			   struct scan_control *sc, unsigned long *nr,
 			   unsigned long *lru_pages)
 {
-	int swappiness = mem_cgroup_swappiness(memcg);
+	int swappiness = sc->proactive_swappiness ?
+		*sc->proactive_swappiness : mem_cgroup_swappiness(memcg);
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
 	u64 fraction[2];
 	u64 denominator = 0;	/* gcc */
@@ -3384,7 +3391,8 @@ unsigned long mem_cgroup_shrink_node(struct mem_cgroup *memcg,
 unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 					   unsigned long nr_pages,
 					   gfp_t gfp_mask,
-					   bool may_swap)
+					   bool may_swap,
+					   int *proactive_swappiness)
 {
 	struct zonelist *zonelist;
 	unsigned long nr_reclaimed;
@@ -3401,6 +3409,7 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		.may_writepage = !laptop_mode,
 		.may_unmap = 1,
 		.may_swap = may_swap,
+		.proactive_swappiness = proactive_swappiness,
 		.may_shrinkslab = 1,
 	};
 
