@@ -57,6 +57,10 @@
 #include <asm/cacheflush.h>
 #include "audit.h"	/* audit_signal_info() */
 
+#ifdef CONFIG_REKERNEL
+#include <../drivers/rekernel/rekernel.h>
+#endif
+
 /*
  * SLAB caches for signal bits.
  */
@@ -1269,6 +1273,14 @@ int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
 {
 	unsigned long flags;
 	int ret = -ESRCH;
+
+#ifdef CONFIG_REKERNEL
+	/* OP6 Re:Kernel signal notification path for frozen app groups. */
+	if (sig == SIGKILL || sig == SIGTERM || sig == SIGABRT || sig == SIGQUIT)
+		rekernel_report(SIGNAL, sig,
+				task_tgid_nr(current), current,
+				task_tgid_nr(p), p, false, NULL);
+#endif
 
 	if (lock_task_sighand(p, &flags)) {
 		ret = send_signal(sig, info, p, type);
