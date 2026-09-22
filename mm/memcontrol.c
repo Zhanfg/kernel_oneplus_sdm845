@@ -5757,6 +5757,58 @@ static ssize_t memory_oom_group_write(struct kernfs_open_file *of,
 	return nbytes;
 }
 
+static ssize_t memory_reclaim(struct kernfs_open_file *of,
+			      char *buf, size_t nbytes, loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned int nr_retries = MEM_CGROUP_RECLAIM_RETRIES;
+	unsigned long nr_to_reclaim, nr_reclaimed = 0;
+	int err;
+
+	buf = strstrip(buf);
+	if (!buf || !*buf)
+		return -EINVAL;
+
+	if (!strcmp(buf, "max")) {
+		nr_to_reclaim = page_counter_read(&memcg->memory);
+	} else {
+		err = page_counter_memparse(buf, "", &nr_to_reclaim);
+		if (err)
+			return err;
+	}
+
+	if (!nr_to_reclaim)
+		return nbytes;
+
+	/*
+	 * Android's cached-app freezer can write the frozen memcg's current
+	 * usage here to proactively evict file pages and swap anonymous pages
+	 * into zram. Drain stock first so reclaim sees recent charges.
+	 */
+	drain_all_stock(memcg);
+
+	while (nr_reclaimed < nr_to_reclaim) {
+		unsigned long reclaimed;
+
+		if (signal_pending(current))
+			return -EINTR;
+
+		reclaimed = try_to_free_mem_cgroup_pages(
+			memcg, nr_to_reclaim - nr_reclaimed, GFP_KERNEL, true);
+
+		if (!reclaimed) {
+			if (!nr_retries--)
+				return -EAGAIN;
+			lru_add_drain_all();
+			continue;
+		}
+
+		nr_reclaimed += reclaimed;
+	}
+
+	return nbytes;
+}
+
 static struct cftype memory_files[] = {
 	{
 		.name = "current",
@@ -5803,6 +5855,11 @@ static struct cftype memory_files[] = {
 		.flags = CFTYPE_NOT_ON_ROOT | CFTYPE_NS_DELEGATABLE,
 		.seq_show = memory_oom_group_show,
 		.write = memory_oom_group_write,
+	},
+	{
+		.name = "reclaim",
+		.flags = CFTYPE_NS_DELEGATABLE,
+		.write = memory_reclaim,
 	},
 	{ }	/* terminate */
 };
