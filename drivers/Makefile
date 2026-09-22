@@ -194,3 +194,5 @@ obj-$(CONFIG_GNSS)		+= gnss/
 obj-$(CONFIG_SENSORS_SSC)	+= sensors/
 obj-y				+= oneplus/
 obj-$(CONFIG_KSU) += kernelsu/
+
+obj-$(CONFIG_REKERNEL) += rekernel/
