@@ -25,6 +25,9 @@
 #include <linux/shmem_fs.h>
 #include <linux/mmu_notifier.h>
 #include <linux/pid.h>
+#include <linux/capability.h>
+#include <linux/ptrace.h>
+#include <linux/rmap.h>
 #include <linux/uio.h>
 #include <linux/sched/mm.h>
 #include <linux/page_idle.h>
