@@ -24,10 +24,19 @@
 #include <linux/swapops.h>
 #include <linux/shmem_fs.h>
 #include <linux/mmu_notifier.h>
+#include <linux/pid.h>
+#include <linux/uio.h>
+#include <linux/sched/mm.h>
+#include <linux/page_idle.h>
 
 #include <asm/tlb.h>
 
 #include "internal.h"
+
+struct madvise_walk_private {
+	struct mmu_gather *tlb;
+	bool pageout;
+};
 
 /*
  * Any behaviour which results in changes to the vma->vm_flags needs to
@@ -40,6 +49,8 @@ static int madvise_need_mmap_write(int behavior)
 	case MADV_REMOVE:
 	case MADV_WILLNEED:
 	case MADV_DONTNEED:
+	case MADV_COLD:
+	case MADV_PAGEOUT:
 	case MADV_FREE:
 		return 0;
 	default:
@@ -306,6 +317,175 @@ static long madvise_willneed(struct vm_area_struct *vma,
 	end = ((end - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
 
 	force_page_cache_readahead(file->f_mapping, file, start, end - start);
+	return 0;
+}
+
+static inline bool can_do_file_pageout(struct vm_area_struct *vma)
+{
+	if (!vma->vm_file)
+		return false;
+
+	/*
+	 * Do not page out a shared file mapping unless the caller would be
+	 * allowed to write the backing file. This preserves the upstream
+	 * side-channel restriction.
+	 */
+	return inode_owner_or_capable(file_inode(vma->vm_file)) ||
+		inode_permission(file_inode(vma->vm_file), MAY_WRITE) == 0;
+}
+
+static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
+				unsigned long addr, unsigned long end,
+				struct mm_walk *walk)
+{
+	struct madvise_walk_private *private = walk->private;
+	struct mmu_gather *tlb = private->tlb;
+	bool pageout = private->pageout;
+	struct vm_area_struct *vma = walk->vma;
+	struct mm_struct *mm = vma->vm_mm;
+	bool anon_only = pageout && !vma_is_anonymous(vma) &&
+			 !can_do_file_pageout(vma);
+	pte_t *orig_pte, *pte, ptent;
+	spinlock_t *ptl;
+	LIST_HEAD(page_list);
+
+	if (fatal_signal_pending(current))
+		return -EINTR;
+
+	/* Keep the 4.19 backport simple: split THP and use the normal PTE path. */
+	split_huge_pmd(vma, addr, pmd);
+	if (pmd_trans_unstable(pmd))
+		return 0;
+
+	tlb_remove_check_page_size_change(tlb, PAGE_SIZE);
+	orig_pte = pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+	flush_tlb_batched_pending(mm);
+	arch_enter_lazy_mmu_mode();
+
+	for (; addr < end; pte++, addr += PAGE_SIZE) {
+		struct page *page;
+
+		ptent = *pte;
+		if (!pte_present(ptent))
+			continue;
+
+		page = vm_normal_page(vma, addr, ptent);
+		if (!page || !PageLRU(page) || page_mapcount(page) != 1)
+			continue;
+		if (anon_only && !PageAnon(page))
+			continue;
+
+		if (pte_young(ptent)) {
+			ptent = ptep_get_and_clear_full(mm, addr, pte, tlb->fullmm);
+			ptent = pte_mkold(ptent);
+			set_pte_at(mm, addr, pte, ptent);
+			tlb_remove_tlb_entry(tlb, pte, addr);
+		}
+
+		ClearPageReferenced(page);
+		test_and_clear_page_young(page);
+
+		if (!pageout) {
+			deactivate_page(page);
+			continue;
+		}
+
+		if (!isolate_lru_page(page)) {
+			if (PageUnevictable(page)) {
+				putback_lru_page(page);
+				continue;
+			}
+			list_add(&page->lru, &page_list);
+			inc_node_page_state(page, NR_ISOLATED_ANON +
+					    page_is_file_cache(page));
+		}
+	}
+
+	arch_leave_lazy_mmu_mode();
+	pte_unmap_unlock(orig_pte, ptl);
+
+#ifdef CONFIG_PROCESS_RECLAIM
+	if (pageout)
+		reclaim_pages_from_list(&page_list, vma);
+#else
+	while (!list_empty(&page_list)) {
+		struct page *page = lru_to_page(&page_list);
+		list_del(&page->lru);
+		dec_node_page_state(page, NR_ISOLATED_ANON +
+				    page_is_file_cache(page));
+		putback_lru_page(page);
+	}
+#endif
+	cond_resched();
+	return 0;
+}
+
+static void madvise_cold_page_range(struct mmu_gather *tlb,
+				    struct vm_area_struct *vma,
+				    unsigned long addr, unsigned long end)
+{
+	struct madvise_walk_private private = {
+		.tlb = tlb,
+		.pageout = false,
+	};
+	struct mm_walk walk = {
+		.mm = vma->vm_mm,
+		.pmd_entry = madvise_cold_or_pageout_pte_range,
+		.private = &private,
+	};
+
+	tlb_start_vma(tlb, vma);
+	walk_page_range(addr, end, &walk);
+	tlb_end_vma(tlb, vma);
+}
+
+static long madvise_cold(struct vm_area_struct *vma,
+			 struct vm_area_struct **prev,
+			 unsigned long start, unsigned long end)
+{
+	struct mmu_gather tlb;
+
+	*prev = vma;
+	if (!can_madv_lru_vma(vma))
+		return -EINVAL;
+
+	lru_add_drain();
+	tlb_gather_mmu(&tlb, vma->vm_mm, start, end);
+	madvise_cold_page_range(&tlb, vma, start, end);
+	tlb_finish_mmu(&tlb, start, end);
+	return 0;
+}
+
+static long madvise_pageout(struct vm_area_struct *vma,
+			    struct vm_area_struct **prev,
+			    unsigned long start, unsigned long end)
+{
+	struct madvise_walk_private private = {
+		.pageout = true,
+	};
+	struct mmu_gather tlb;
+	struct mm_walk walk;
+
+	*prev = vma;
+	if (!can_madv_lru_vma(vma))
+		return -EINVAL;
+
+	if (!vma_is_anonymous(vma) && !can_do_file_pageout(vma) &&
+	    (vma->vm_flags & VM_MAYSHARE))
+		return 0;
+
+	lru_add_drain();
+	tlb_gather_mmu(&tlb, vma->vm_mm, start, end);
+	private.tlb = &tlb;
+	walk = (struct mm_walk) {
+		.mm = vma->vm_mm,
+		.pmd_entry = madvise_cold_or_pageout_pte_range,
+		.private = &private,
+	};
+	tlb_start_vma(&tlb, vma);
+	walk_page_range(start, end, &walk);
+	tlb_end_vma(&tlb, vma);
+	tlb_finish_mmu(&tlb, start, end);
 	return 0;
 }
 
@@ -697,6 +877,10 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 		return madvise_remove(vma, prev, start, end);
 	case MADV_WILLNEED:
 		return madvise_willneed(vma, prev, start, end);
+	case MADV_COLD:
+		return madvise_cold(vma, prev, start, end);
+	case MADV_PAGEOUT:
+		return madvise_pageout(vma, prev, start, end);
 	case MADV_FREE:
 	case MADV_DONTNEED:
 		return madvise_dontneed_free(vma, prev, start, end, behavior);
@@ -718,6 +902,8 @@ madvise_behavior_valid(int behavior)
 	case MADV_WILLNEED:
 	case MADV_DONTNEED:
 	case MADV_FREE:
+	case MADV_COLD:
+	case MADV_PAGEOUT:
 #ifdef CONFIG_KSM
 	case MADV_MERGEABLE:
 	case MADV_UNMERGEABLE:
@@ -739,6 +925,11 @@ madvise_behavior_valid(int behavior)
 	default:
 		return false;
 	}
+}
+
+static bool process_madvise_behavior_valid(int behavior)
+{
+	return behavior == MADV_COLD || behavior == MADV_PAGEOUT;
 }
 
 /*
@@ -802,7 +993,8 @@ madvise_behavior_valid(int behavior)
  *  -EBADF  - map exists, but area maps something that isn't a file.
  *  -EAGAIN - a kernel resource was temporarily unavailable.
  */
-SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
+static int do_madvise(struct mm_struct *mm, unsigned long start,
+		      size_t len_in, int behavior)
 {
 	unsigned long end, tmp;
 	struct vm_area_struct *vma, *prev;
@@ -840,10 +1032,10 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 
 	write = madvise_need_mmap_write(behavior);
 	if (write) {
-		if (down_write_killable(&current->mm->mmap_sem))
+		if (down_write_killable(&mm->mmap_sem))
 			return -EINTR;
 	} else {
-		down_read(&current->mm->mmap_sem);
+		down_read(&mm->mmap_sem);
 	}
 
 	/*
@@ -851,7 +1043,7 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 	 * ranges, just ignore them, but return -ENOMEM at the end.
 	 * - different from the way of handling in mlock etc.
 	 */
-	vma = find_vma_prev(current->mm, start, &prev);
+	vma = find_vma_prev(mm, start, &prev);
 	if (vma && start > vma->vm_start)
 		prev = vma;
 
@@ -888,14 +1080,91 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 		if (prev)
 			vma = prev->vm_next;
 		else	/* madvise_remove dropped mmap_sem */
-			vma = find_vma(current->mm, start);
+			vma = find_vma(mm, start);
 	}
 out:
 	blk_finish_plug(&plug);
 	if (write)
-		up_write(&current->mm->mmap_sem);
+		up_write(&mm->mmap_sem);
 	else
-		up_read(&current->mm->mmap_sem);
+		up_read(&mm->mmap_sem);
 
 	return error;
+}
+
+
+SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
+{
+	return do_madvise(current->mm, start, len_in, behavior);
+}
+
+SYSCALL_DEFINE5(process_madvise, int, pidfd, const struct iovec __user *, vec,
+		size_t, vlen, int, behavior, unsigned int, flags)
+{
+	struct iovec iovstack[UIO_FASTIOV], iovec;
+	struct iovec *iov = iovstack;
+	struct iov_iter iter;
+	struct task_struct *task;
+	struct mm_struct *mm;
+	struct pid *pid;
+	unsigned int f_flags;
+	size_t total_len;
+	ssize_t ret;
+
+	if (flags)
+		return -EINVAL;
+
+	ret = import_iovec(READ, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter);
+	if (ret < 0)
+		return ret;
+
+	pid = pidfd_get_pid(pidfd, &f_flags);
+	if (IS_ERR(pid)) {
+		ret = PTR_ERR(pid);
+		goto free_iov;
+	}
+
+	task = get_pid_task(pid, PIDTYPE_PID);
+	if (!task) {
+		ret = -ESRCH;
+		goto put_pid;
+	}
+
+	if (!process_madvise_behavior_valid(behavior)) {
+		ret = -EINVAL;
+		goto put_task;
+	}
+
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	if (IS_ERR_OR_NULL(mm)) {
+		ret = IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+		goto put_task;
+	}
+
+	if (!capable(CAP_SYS_NICE)) {
+		ret = -EPERM;
+		goto put_mm;
+	}
+
+	total_len = iov_iter_count(&iter);
+	while (iov_iter_count(&iter)) {
+		iovec = iov_iter_iovec(&iter);
+		ret = do_madvise(mm, (unsigned long)iovec.iov_base,
+				 iovec.iov_len, behavior);
+		if (ret < 0)
+			break;
+		iov_iter_advance(&iter, iovec.iov_len);
+	}
+
+	ret = (total_len - iov_iter_count(&iter)) ?: ret;
+
+put_mm:
+	mmput(mm);
+put_task:
+	put_task_struct(task);
+put_pid:
+	put_pid(pid);
+free_iov:
+	kfree(iov);
+	return ret;
 }
